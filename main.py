@@ -22,11 +22,10 @@ import logging
 import sys
 from pathlib import Path
 
+from src.config import CACHE_PATH
 from src.graph import DJGraph
 from src.metrics import calculate_weight
 from src.utils import scan_directory
-
-CACHE_PATH = Path("dj_graph_cache.json")
 
 logging.basicConfig(
     level=logging.INFO,
