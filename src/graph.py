@@ -33,13 +33,16 @@ if no finite-cost path exists, it reports the target as unreachable.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from itertools import permutations
+from pathlib import Path
 
 import networkx as nx
+import numpy as np
 
-from src.metrics import calculate_weight
+from src.metrics import calculate_weight, is_compatible
 from src.models import Song
 
 logger = logging.getLogger(__name__)
@@ -115,6 +118,11 @@ class DJGraph:
         """
         Evaluate every ordered song pair and add finite-cost edges.
 
+        A lightweight ``is_compatible()`` BPM check is performed first
+        so that clearly unmixable pairs are skipped without computing
+        the full (harmonic + semantic) weight.  This produces a sparse
+        graph rather than a dense, fully connected one.
+
         We iterate over all permutations (not combinations) because
         the graph is directed: the cost of A→B may differ from B→A
         with future asymmetric metrics.
@@ -124,6 +132,12 @@ class DJGraph:
         songs = list(self._songs.values())
 
         for song_a, song_b in permutations(songs, 2):
+            # Fast BPM gate — skip pairs that are clearly unmixable
+            # before computing the expensive harmonic/semantic metrics.
+            if not is_compatible(song_a, song_b):
+                skipped += 1
+                continue
+
             cost = calculate_weight(song_a, song_b, weights=weights)
 
             if math.isinf(cost):
@@ -142,6 +156,87 @@ class DJGraph:
             edge_count,
             skipped,
         )
+
+    # ------------------------------------------------------------------
+    # Serialization (caching)
+    # ------------------------------------------------------------------
+
+    def save_to_json(self, path: str | Path) -> None:
+        """
+        Serialize the graph to a JSON file.
+
+        The JSON structure stores every Song's metadata and embedding
+        (as a plain list) plus the full adjacency list with weights,
+        allowing the graph to be reconstructed without re-scanning
+        audio files.
+        """
+        path = Path(path)
+
+        songs_data = []
+        for song in self._songs.values():
+            songs_data.append({
+                "file_path": song.file_path,
+                "filename": song.filename,
+                "bpm": song.bpm,
+                "key": song.key,
+                "embedding": song.embedding.tolist(),
+            })
+
+        edges_data = []
+        for src, dst, data in self.graph.edges(data=True):
+            edges_data.append({
+                "source": src,
+                "target": dst,
+                "weight": data["weight"],
+            })
+
+        payload = {"songs": songs_data, "edges": edges_data}
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        logger.info("Graph saved to '%s'.", path)
+
+    @classmethod
+    def load_from_json(cls, path: str | Path) -> DJGraph:
+        """
+        Reconstruct a DJGraph from a JSON cache file previously
+        written by ``save_to_json()``.
+
+        Song objects and their numpy embeddings are fully restored so
+        that pathfinding and weight queries work identically to a
+        freshly-built graph.
+        """
+        path = Path(path)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+
+        instance = cls()
+
+        # Rebuild Song objects and register them as nodes.
+        for s in raw["songs"]:
+            song = Song(
+                file_path=s["file_path"],
+                filename=s["filename"],
+                bpm=s["bpm"],
+                key=s["key"],
+                embedding=np.array(s["embedding"], dtype=np.float32),
+            )
+            instance._songs[song.file_path] = song
+            instance.graph.add_node(
+                song.file_path,
+                filename=song.filename,
+                bpm=song.bpm,
+                key=song.key,
+            )
+
+        # Rebuild directed edges.
+        for e in raw["edges"]:
+            instance.graph.add_edge(e["source"], e["target"], weight=e["weight"])
+
+        logger.info(
+            "Graph loaded from '%s': %d node(s), %d edge(s).",
+            path,
+            instance.num_nodes,
+            instance.num_edges,
+        )
+        return instance
 
     # ------------------------------------------------------------------
     # Queries

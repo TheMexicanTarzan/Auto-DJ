@@ -17,6 +17,7 @@ from src.metrics import (
     _key_to_fifths_position,
     calculate_weight,
     harmonic_distance,
+    is_compatible,
     semantic_distance,
     tempo_penalty,
 )
@@ -269,3 +270,50 @@ class TestCalculateWeight:
     def test_default_weights_sum_to_one(self):
         total = sum(DEFAULT_WEIGHTS.values())
         assert total == pytest.approx(1.0)
+
+
+# =========================================================================
+# 6. BPM compatibility pre-check
+# =========================================================================
+
+
+class TestIsCompatible:
+    def test_identical_bpm_is_compatible(self):
+        a = _make_song(bpm=128.0)
+        b = _make_song(bpm=128.0)
+        assert is_compatible(a, b) is True
+
+    def test_within_threshold_is_compatible(self):
+        a = _make_song(bpm=120.0)
+        b = _make_song(bpm=126.0)  # 5% diff
+        assert is_compatible(a, b) is True
+
+    def test_at_threshold_is_compatible(self):
+        a = _make_song(bpm=100.0)
+        b = _make_song(bpm=108.0)  # exactly 8%
+        assert is_compatible(a, b) is True
+
+    def test_above_threshold_is_incompatible(self):
+        a = _make_song(bpm=100.0)
+        b = _make_song(bpm=110.0)  # 10% > 8%
+        assert is_compatible(a, b) is False
+
+    def test_large_gap_is_incompatible(self):
+        a = _make_song(bpm=80.0)
+        b = _make_song(bpm=160.0)
+        assert is_compatible(a, b) is False
+
+    def test_zero_bpm_is_incompatible(self):
+        a = _make_song(bpm=0.0)
+        b = _make_song(bpm=120.0)
+        assert is_compatible(a, b) is False
+
+    def test_negative_bpm_is_incompatible(self):
+        a = _make_song(bpm=-10.0)
+        b = _make_song(bpm=120.0)
+        assert is_compatible(a, b) is False
+
+    def test_symmetry(self):
+        a = _make_song(bpm=120.0)
+        b = _make_song(bpm=125.0)
+        assert is_compatible(a, b) == is_compatible(b, a)

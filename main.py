@@ -20,10 +20,13 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from src.graph import DJGraph
 from src.metrics import calculate_weight
 from src.utils import scan_directory
+
+CACHE_PATH = Path("dj_graph_cache.json")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,19 +79,27 @@ def _print_path(path: list, total_cost: float) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
-    # --- 1. Scan & analyse ------------------------------------------------
-    logger.info("Scanning '%s' for audio files...", args.directory)
-    songs = scan_directory(args.directory)
+    # --- 1. Load from cache or scan & build --------------------------------
+    if CACHE_PATH.exists():
+        logger.info("Loading graph from cache '%s'...", CACHE_PATH)
+        dj_graph = DJGraph.load_from_json(CACHE_PATH)
+    else:
+        logger.info("Scanning '%s' for audio files...", args.directory)
+        songs = scan_directory(args.directory)
 
-    if not songs:
-        logger.error("No audio files found in '%s'.", args.directory)
-        return 1
+        if not songs:
+            logger.error("No audio files found in '%s'.", args.directory)
+            return 1
 
-    logger.info("Loaded %d track(s).", len(songs))
+        logger.info("Loaded %d track(s).", len(songs))
 
-    # --- 2. Build graph ---------------------------------------------------
-    logger.info("Building mixing graph...")
-    dj_graph = DJGraph.build(songs)
+        # --- 2. Build graph -----------------------------------------------
+        logger.info("Building mixing graph...")
+        dj_graph = DJGraph.build(songs)
+
+        # --- Save to cache for future runs --------------------------------
+        dj_graph.save_to_json(CACHE_PATH)
+
     logger.info(
         "Graph ready: %d node(s), %d edge(s).",
         dj_graph.num_nodes,

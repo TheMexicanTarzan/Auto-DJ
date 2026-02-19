@@ -155,6 +155,24 @@ def harmonic_distance(key_a: str, key_b: str) -> float:
 _MAX_BPM_DIFF_PERCENT: float = 8.0
 
 
+def is_compatible(song_a: Song, song_b: Song) -> bool:
+    """
+    Quick BPM-based compatibility check between two songs.
+
+    Returns True if the BPM difference is within the mixable threshold
+    (≤ 8%), False otherwise.  This is a lightweight gate intended to be
+    called *before* the more expensive ``calculate_weight()`` so that
+    incompatible pairs can be skipped without computing harmonic or
+    semantic distances.
+    """
+    if song_a.bpm <= 0 or song_b.bpm <= 0:
+        return False
+
+    diff = abs(song_a.bpm - song_b.bpm)
+    percent_diff = (diff / min(song_a.bpm, song_b.bpm)) * 100.0
+    return percent_diff <= _MAX_BPM_DIFF_PERCENT
+
+
 def tempo_penalty(bpm_a: float, bpm_b: float) -> float:
     """
     Return a tempo-compatibility penalty in [0.0, 1.0], or float('inf')

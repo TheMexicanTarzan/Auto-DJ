@@ -263,3 +263,102 @@ class TestProperties:
         g = DJGraph.build(songs)
         names = [s.filename for s in g.songs]
         assert names == sorted(names)
+
+
+# =========================================================================
+# Serialization round-trip
+# =========================================================================
+
+
+class TestSerialization:
+    def test_save_and_load_preserves_graph(self, tmp_path):
+        """A save→load round-trip should produce an identical graph."""
+        a = _song("a.mp3", bpm=120, key="C major", embedding=_SHARED_EMB)
+        b = _song("b.mp3", bpm=122, key="G major", embedding=_SHARED_EMB)
+        c = _song("c.mp3", bpm=125, key="D major", embedding=_SHARED_EMB)
+        original = DJGraph.build([a, b, c])
+
+        cache_file = tmp_path / "test_cache.json"
+        original.save_to_json(cache_file)
+
+        loaded = DJGraph.load_from_json(cache_file)
+
+        assert loaded.num_nodes == original.num_nodes
+        assert loaded.num_edges == original.num_edges
+
+    def test_loaded_songs_have_correct_metadata(self, tmp_path):
+        s = _song("track.mp3", bpm=140, key="D minor")
+        g = DJGraph.build([s])
+
+        cache_file = tmp_path / "meta_cache.json"
+        g.save_to_json(cache_file)
+        loaded = DJGraph.load_from_json(cache_file)
+
+        song = loaded.get_song("track.mp3")
+        assert song.filename == "track.mp3"
+        assert song.bpm == 140
+        assert song.key == "D minor"
+
+    def test_loaded_embeddings_are_numpy_arrays(self, tmp_path):
+        emb = np.random.RandomState(99).randn(512).astype(np.float32)
+        s = _song("emb.mp3", bpm=120, embedding=emb)
+        g = DJGraph.build([s])
+
+        cache_file = tmp_path / "emb_cache.json"
+        g.save_to_json(cache_file)
+        loaded = DJGraph.load_from_json(cache_file)
+
+        loaded_song = loaded.get_song("emb.mp3")
+        assert isinstance(loaded_song.embedding, np.ndarray)
+        assert loaded_song.embedding.shape == (512,)
+        np.testing.assert_allclose(loaded_song.embedding, emb, rtol=1e-5)
+
+    def test_loaded_edge_weights_match(self, tmp_path):
+        a = _song("p.mp3", bpm=120, key="C major", embedding=_SHARED_EMB)
+        b = _song("q.mp3", bpm=121, key="C major", embedding=_SHARED_EMB)
+        original = DJGraph.build([a, b])
+
+        cache_file = tmp_path / "edge_cache.json"
+        original.save_to_json(cache_file)
+        loaded = DJGraph.load_from_json(cache_file)
+
+        orig_w = original.edge_weight("p.mp3", "q.mp3")
+        loaded_w = loaded.edge_weight("p.mp3", "q.mp3")
+        assert loaded_w == pytest.approx(orig_w)
+
+    def test_pathfinding_works_on_loaded_graph(self, tmp_path):
+        emb = _SHARED_EMB
+        a = _song("start.mp3", bpm=120, key="C major", embedding=emb)
+        b = _song("end.mp3", bpm=121, key="C major", embedding=emb)
+        original = DJGraph.build([a, b])
+
+        cache_file = tmp_path / "path_cache.json"
+        original.save_to_json(cache_file)
+        loaded = DJGraph.load_from_json(cache_file)
+
+        path, cost = loaded.get_shortest_path("start.mp3", "end.mp3")
+        assert len(path) == 2
+        assert path[0].filename == "start.mp3"
+        assert path[1].filename == "end.mp3"
+        assert cost >= 0.0
+
+    def test_empty_graph_round_trip(self, tmp_path):
+        g = DJGraph.build([])
+        cache_file = tmp_path / "empty_cache.json"
+        g.save_to_json(cache_file)
+        loaded = DJGraph.load_from_json(cache_file)
+        assert loaded.num_nodes == 0
+        assert loaded.num_edges == 0
+
+    def test_disconnected_songs_round_trip(self, tmp_path):
+        """Songs with no edges (incompatible BPM) survive serialization."""
+        a = _song("slow.mp3", bpm=80, key="C major", embedding=_SHARED_EMB)
+        b = _song("fast.mp3", bpm=160, key="C major", embedding=_SHARED_EMB)
+        g = DJGraph.build([a, b])
+
+        cache_file = tmp_path / "disc_cache.json"
+        g.save_to_json(cache_file)
+        loaded = DJGraph.load_from_json(cache_file)
+
+        assert loaded.num_nodes == 2
+        assert loaded.num_edges == 0
