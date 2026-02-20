@@ -1,6 +1,10 @@
 # Audio analysis
+# System dependency: ffmpeg (required for m4a/aac decoding)
+#   sudo apt-get install ffmpeg   # Debian/Ubuntu
+#   brew install ffmpeg            # macOS
 librosa>=0.10.0
 soundfile>=0.12.0
+pydub>=0.25.0
 
 # ML embeddings (CLAP model)
 transformers>=4.30.0
