@@ -50,7 +50,16 @@ def _load_graph() -> DJGraph:
         return DJGraph.load_from_json(CACHE_PATH)
 
     logger.info("No cache found. Scanning '%s' for audio files...", SONGS_DIRECTORY)
-    songs = scan_directory(SONGS_DIRECTORY)
+    try:
+        songs = scan_directory(SONGS_DIRECTORY)
+    except (NotADirectoryError, OSError) as exc:
+        logger.warning(
+            "Cannot scan directory: %s. "
+            "Starting with an empty graph — update SONGS_DIRECTORY in src/config.py.",
+            exc,
+        )
+        return DJGraph.build([])
+
     if not songs:
         logger.warning(
             "No audio files found in '%s'. "
