@@ -71,6 +71,9 @@ def _load_graph_background() -> None:
     try:
         if CACHE_PATH.exists():
             logger.info("Loading graph from cache '%s'...", CACHE_PATH)
+            with _graph_lock:
+                _graph_state["current_file"] = "cache"
+                _graph_state["progress"] = 50
             graph = DJGraph.load_from_json(CACHE_PATH)
         else:
             logger.info(
@@ -102,6 +105,7 @@ def _load_graph_background() -> None:
             logger.info("Building mixing graph from %d track(s)...", len(songs))
             graph = DJGraph.build(songs)
             if songs:
+                CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
                 graph.save_to_json(CACHE_PATH)
 
         with _graph_lock:
@@ -121,9 +125,10 @@ def _load_graph_background() -> None:
             _graph_state["error"] = str(exc)
 
 
-# Start background loading immediately.
-_loader_thread = threading.Thread(target=_load_graph_background, daemon=True)
-_loader_thread.start()
+def _start_loader_thread() -> None:
+    """Launch the background graph-loader thread (called once)."""
+    thread = threading.Thread(target=_load_graph_background, daemon=True)
+    thread.start()
 
 # ---------------------------------------------------------------------------
 # Cytoscape helpers
@@ -541,7 +546,9 @@ def update_progress(n_intervals, already_ready):
     pct = progress["progress"]
     fname = progress["current_file"]
 
-    if total > 0:
+    if fname == "cache":
+        text = "Loading graph from cache..."
+    elif total > 0:
         text = f"Analysing track {current} of {total} ({pct}%) — {fname}"
     else:
         text = "Scanning for audio files..."
@@ -710,4 +717,9 @@ def inspect_node(node_data: dict | None, ready: bool):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    app.run(debug=True, host="127.0.0.1", port=8050)
+    # Disable the reloader so the module is only imported once.
+    # Werkzeug's reloader re-imports the module in a child process,
+    # which discards the background thread's work (graph already loaded
+    # in the parent) and resets _graph_state to "not ready".
+    _start_loader_thread()
+    app.run(debug=True, use_reloader=False, host="127.0.0.1", port=8050)
