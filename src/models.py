@@ -180,7 +180,7 @@ class Song:
             y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
 
         # Prepare inputs and run inference (no gradients needed)
-        inputs = processor(audios=y, sampling_rate=target_sr, return_tensors="pt")
+        inputs = processor(audio=y, sampling_rate=target_sr, return_tensors="pt")
         with torch.no_grad():
             outputs = model.get_audio_features(**inputs)
 
