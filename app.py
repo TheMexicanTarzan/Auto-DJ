@@ -24,7 +24,7 @@ from pathlib import Path
 
 import dash_cytoscape as cyto
 import networkx as nx
-from dash import Dash, Input, Output, State, callback, html, dcc, ctx
+from dash import Dash, Input, Output, State, callback, html, dcc, ctx, no_update
 
 from src.config import CACHE_PATH, SONGS_DIRECTORY
 from src.graph import DJGraph
@@ -249,225 +249,272 @@ _stylesheet = [
 ]
 
 # ---------------------------------------------------------------------------
-# Dash app layout
+# Dash app + dynamic layout
 # ---------------------------------------------------------------------------
 
-app = Dash(__name__)
+app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "Auto-DJ Mix Pathfinder"
 
-app.layout = html.Div(
-    style={
-        "fontFamily": "'Segoe UI', Roboto, sans-serif",
-        "backgroundColor": "#1a202c",
-        "color": "#e2e8f0",
-        "minHeight": "100vh",
-        "padding": "0",
-        "margin": "0",
-    },
-    children=[
-        # Interval timer that polls loading progress
-        dcc.Interval(
-            id="progress-interval",
-            interval=1000,  # 1 second
-            n_intervals=0,
-        ),
-        # Hidden store for graph-ready flag
-        dcc.Store(id="graph-ready", data=False),
-        # Header
-        html.Div(
-            id="header",
-            style={
-                "background": "linear-gradient(135deg, #2d3748, #4a5568)",
-                "padding": "20px 30px",
-                "borderBottom": "2px solid #e53e3e",
-            },
-            children=[
-                html.H1(
-                    "Auto-DJ Mix Pathfinder",
-                    style={"margin": "0", "fontSize": "28px", "color": "#e2e8f0"},
-                ),
-                html.P(
-                    id="header-stats",
-                    children="Loading tracks...",
-                    style={"margin": "5px 0 0 0", "color": "#a0aec0", "fontSize": "14px"},
-                ),
-            ],
-        ),
-        # Loading overlay
-        html.Div(
-            id="loading-overlay",
-            style={
-                "display": "flex",
-                "flexDirection": "column",
-                "alignItems": "center",
-                "justifyContent": "center",
-                "height": "calc(100vh - 90px)",
-                "padding": "40px",
-            },
-            children=[
-                html.H2(
-                    "Analysing your music library...",
-                    style={"color": "#e2e8f0", "marginBottom": "20px"},
-                ),
-                html.Div(
-                    style={
-                        "width": "60%",
-                        "maxWidth": "500px",
-                        "backgroundColor": "#2d3748",
-                        "borderRadius": "8px",
-                        "overflow": "hidden",
-                        "height": "30px",
-                        "border": "1px solid #4a5568",
-                    },
-                    children=[
-                        html.Div(
-                            id="progress-bar",
-                            style={
-                                "width": "0%",
-                                "height": "100%",
-                                "backgroundColor": "#e53e3e",
-                                "transition": "width 0.5s ease",
-                                "borderRadius": "8px",
-                            },
-                        ),
-                    ],
-                ),
-                html.P(
-                    id="progress-text",
-                    children="Starting up...",
-                    style={
-                        "color": "#a0aec0",
-                        "marginTop": "12px",
-                        "fontSize": "14px",
-                    },
-                ),
-            ],
-        ),
-        # Main content: sidebar + graph (hidden until ready)
-        html.Div(
-            id="main-content",
-            style={"display": "none", "height": "calc(100vh - 90px)"},
-            children=[
-                # ---- Left sidebar (controls + details) ----
-                html.Div(
-                    style={
-                        "width": "360px",
-                        "minWidth": "360px",
-                        "backgroundColor": "#2d3748",
-                        "padding": "20px",
-                        "overflowY": "auto",
-                        "borderRight": "1px solid #4a5568",
-                    },
-                    children=[
-                        # -- Pathfinding controls --
-                        html.H3(
-                            "Pathfinding",
-                            style={"marginTop": "0", "color": "#e2e8f0"},
-                        ),
-                        html.Label(
-                            "Start Song",
-                            style={"fontSize": "13px", "color": "#a0aec0"},
-                        ),
-                        dcc.Dropdown(
-                            id="start-dropdown",
-                            options=[],
-                            placeholder="Search for a track...",
-                            searchable=True,
-                            style={
-                                "marginBottom": "12px",
-                                "backgroundColor": "#4a5568",
-                                "color": "#1a202c",
-                            },
-                        ),
-                        html.Label(
-                            "Destination Song",
-                            style={"fontSize": "13px", "color": "#a0aec0"},
-                        ),
-                        dcc.Dropdown(
-                            id="end-dropdown",
-                            options=[],
-                            placeholder="Search for a track...",
-                            searchable=True,
-                            style={
-                                "marginBottom": "12px",
-                                "backgroundColor": "#4a5568",
-                                "color": "#1a202c",
-                            },
-                        ),
-                        html.Button(
-                            "Find Path",
-                            id="find-path-btn",
-                            n_clicks=0,
-                            style={
-                                "width": "100%",
-                                "padding": "10px",
-                                "backgroundColor": "#e53e3e",
-                                "color": "#ffffff",
-                                "border": "none",
-                                "borderRadius": "6px",
-                                "cursor": "pointer",
-                                "fontSize": "15px",
-                                "fontWeight": "bold",
-                            },
-                        ),
-                        # -- Path results --
-                        html.Div(
-                            id="path-output",
-                            style={
-                                "marginTop": "18px",
-                                "padding": "14px",
-                                "backgroundColor": "#1a202c",
-                                "borderRadius": "6px",
-                                "fontSize": "13px",
-                                "whiteSpace": "pre-wrap",
-                                "maxHeight": "260px",
-                                "overflowY": "auto",
-                                "border": "1px solid #4a5568",
-                            },
-                            children="Select two songs and click Find Path.",
-                        ),
-                        html.Hr(style={"borderColor": "#4a5568", "margin": "20px 0"}),
-                        # -- Node details panel --
-                        html.H3(
-                            "Track Details",
-                            style={"marginTop": "0", "color": "#e2e8f0"},
-                        ),
-                        html.Div(
-                            id="node-details",
-                            style={
-                                "padding": "14px",
-                                "backgroundColor": "#1a202c",
-                                "borderRadius": "6px",
-                                "fontSize": "13px",
-                                "whiteSpace": "pre-wrap",
-                                "maxHeight": "280px",
-                                "overflowY": "auto",
-                                "border": "1px solid #4a5568",
-                            },
-                            children="Click a node on the graph to see details.",
-                        ),
-                    ],
-                ),
-                # ---- Graph area ----
-                html.Div(
-                    style={"flex": "1", "position": "relative"},
-                    children=[
-                        cyto.Cytoscape(
-                            id="cyto-graph",
-                            elements=[],
-                            layout={"name": "cose", "animate": False},
-                            stylesheet=_stylesheet,
-                            style={"width": "100%", "height": "100%"},
-                            minZoom=0.2,
-                            maxZoom=3.0,
-                            responsive=True,
-                        ),
-                    ],
-                ),
-            ],
-        ),
-    ],
-)
+
+def _make_layout():
+    """Build the layout dynamically on each page load.
+
+    When the graph is already loaded (e.g. from the JSON cache), the
+    initial HTML is served with the main content *already visible* and
+    the loading overlay hidden.  This eliminates the dependency on a
+    client-side callback to transition from loading → ready, which
+    avoids timing issues across Dash versions.
+    """
+    progress = _get_progress()
+    graph = _get_graph()
+    is_ready = progress["ready"] and graph is not None
+
+    # Pre-compute values when the graph is already loaded
+    if is_ready:
+        overlay_style = {"display": "none"}
+        main_style = {"display": "flex", "height": "calc(100vh - 90px)"}
+        elements = _build_cytoscape_elements(graph)
+        song_options = [
+            {"label": f"{s.filename}  ({s.bpm} BPM, {s.key})", "value": s.file_path}
+            for s in graph.songs
+        ]
+        stats_text = (
+            f"{graph.num_nodes} tracks loaded | "
+            f"{graph.num_edges} possible transitions"
+        )
+        interval_disabled = True
+        bar_width = "100%"
+        progress_text = "Done!"
+        ready_flag = True
+    else:
+        overlay_style = {
+            "display": "flex",
+            "flexDirection": "column",
+            "alignItems": "center",
+            "justifyContent": "center",
+            "height": "calc(100vh - 90px)",
+            "padding": "40px",
+        }
+        main_style = {"display": "none", "height": "calc(100vh - 90px)"}
+        elements = []
+        song_options = []
+        stats_text = "Loading tracks..."
+        interval_disabled = False
+        bar_width = f'{progress["progress"]}%'
+        progress_text = "Starting up..."
+        ready_flag = False
+
+    return html.Div(
+        style={
+            "fontFamily": "'Segoe UI', Roboto, sans-serif",
+            "backgroundColor": "#1a202c",
+            "color": "#e2e8f0",
+            "minHeight": "100vh",
+            "padding": "0",
+            "margin": "0",
+        },
+        children=[
+            # Interval timer that polls loading progress
+            dcc.Interval(
+                id="progress-interval",
+                interval=1000,
+                n_intervals=0,
+                disabled=interval_disabled,
+            ),
+            # Hidden store for graph-ready flag
+            dcc.Store(id="graph-ready", data=ready_flag),
+            # Header
+            html.Div(
+                id="header",
+                style={
+                    "background": "linear-gradient(135deg, #2d3748, #4a5568)",
+                    "padding": "20px 30px",
+                    "borderBottom": "2px solid #e53e3e",
+                },
+                children=[
+                    html.H1(
+                        "Auto-DJ Mix Pathfinder",
+                        style={"margin": "0", "fontSize": "28px", "color": "#e2e8f0"},
+                    ),
+                    html.P(
+                        id="header-stats",
+                        children=stats_text,
+                        style={"margin": "5px 0 0 0", "color": "#a0aec0", "fontSize": "14px"},
+                    ),
+                ],
+            ),
+            # Loading overlay
+            html.Div(
+                id="loading-overlay",
+                style=overlay_style,
+                children=[
+                    html.H2(
+                        "Analysing your music library...",
+                        style={"color": "#e2e8f0", "marginBottom": "20px"},
+                    ),
+                    html.Div(
+                        style={
+                            "width": "60%",
+                            "maxWidth": "500px",
+                            "backgroundColor": "#2d3748",
+                            "borderRadius": "8px",
+                            "overflow": "hidden",
+                            "height": "30px",
+                            "border": "1px solid #4a5568",
+                        },
+                        children=[
+                            html.Div(
+                                id="progress-bar",
+                                style={
+                                    "width": bar_width,
+                                    "height": "100%",
+                                    "backgroundColor": "#e53e3e",
+                                    "transition": "width 0.5s ease",
+                                    "borderRadius": "8px",
+                                },
+                            ),
+                        ],
+                    ),
+                    html.P(
+                        id="progress-text",
+                        children=progress_text,
+                        style={
+                            "color": "#a0aec0",
+                            "marginTop": "12px",
+                            "fontSize": "14px",
+                        },
+                    ),
+                ],
+            ),
+            # Main content: sidebar + graph
+            html.Div(
+                id="main-content",
+                style=main_style,
+                children=[
+                    # ---- Left sidebar (controls + details) ----
+                    html.Div(
+                        style={
+                            "width": "360px",
+                            "minWidth": "360px",
+                            "backgroundColor": "#2d3748",
+                            "padding": "20px",
+                            "overflowY": "auto",
+                            "borderRight": "1px solid #4a5568",
+                        },
+                        children=[
+                            # -- Pathfinding controls --
+                            html.H3(
+                                "Pathfinding",
+                                style={"marginTop": "0", "color": "#e2e8f0"},
+                            ),
+                            html.Label(
+                                "Start Song",
+                                style={"fontSize": "13px", "color": "#a0aec0"},
+                            ),
+                            dcc.Dropdown(
+                                id="start-dropdown",
+                                options=song_options,
+                                placeholder="Search for a track...",
+                                searchable=True,
+                                style={
+                                    "marginBottom": "12px",
+                                    "backgroundColor": "#4a5568",
+                                    "color": "#1a202c",
+                                },
+                            ),
+                            html.Label(
+                                "Destination Song",
+                                style={"fontSize": "13px", "color": "#a0aec0"},
+                            ),
+                            dcc.Dropdown(
+                                id="end-dropdown",
+                                options=song_options,
+                                placeholder="Search for a track...",
+                                searchable=True,
+                                style={
+                                    "marginBottom": "12px",
+                                    "backgroundColor": "#4a5568",
+                                    "color": "#1a202c",
+                                },
+                            ),
+                            html.Button(
+                                "Find Path",
+                                id="find-path-btn",
+                                n_clicks=0,
+                                style={
+                                    "width": "100%",
+                                    "padding": "10px",
+                                    "backgroundColor": "#e53e3e",
+                                    "color": "#ffffff",
+                                    "border": "none",
+                                    "borderRadius": "6px",
+                                    "cursor": "pointer",
+                                    "fontSize": "15px",
+                                    "fontWeight": "bold",
+                                },
+                            ),
+                            # -- Path results --
+                            html.Div(
+                                id="path-output",
+                                style={
+                                    "marginTop": "18px",
+                                    "padding": "14px",
+                                    "backgroundColor": "#1a202c",
+                                    "borderRadius": "6px",
+                                    "fontSize": "13px",
+                                    "whiteSpace": "pre-wrap",
+                                    "maxHeight": "260px",
+                                    "overflowY": "auto",
+                                    "border": "1px solid #4a5568",
+                                },
+                                children="Select two songs and click Find Path.",
+                            ),
+                            html.Hr(style={"borderColor": "#4a5568", "margin": "20px 0"}),
+                            # -- Node details panel --
+                            html.H3(
+                                "Track Details",
+                                style={"marginTop": "0", "color": "#e2e8f0"},
+                            ),
+                            html.Div(
+                                id="node-details",
+                                style={
+                                    "padding": "14px",
+                                    "backgroundColor": "#1a202c",
+                                    "borderRadius": "6px",
+                                    "fontSize": "13px",
+                                    "whiteSpace": "pre-wrap",
+                                    "maxHeight": "280px",
+                                    "overflowY": "auto",
+                                    "border": "1px solid #4a5568",
+                                },
+                                children="Click a node on the graph to see details.",
+                            ),
+                        ],
+                    ),
+                    # ---- Graph area ----
+                    html.Div(
+                        style={"flex": "1", "position": "relative"},
+                        children=[
+                            cyto.Cytoscape(
+                                id="cyto-graph",
+                                elements=elements,
+                                layout={"name": "cose", "animate": False},
+                                stylesheet=_stylesheet,
+                                style={"width": "100%", "height": "100%"},
+                                minZoom=0.2,
+                                maxZoom=3.0,
+                                responsive=True,
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+app.layout = _make_layout
+
 
 # ---------------------------------------------------------------------------
 # Callback — Progress polling + transition to main UI
@@ -487,9 +534,19 @@ app.layout = html.Div(
     Output("graph-ready", "data"),
     Input("progress-interval", "n_intervals"),
     State("graph-ready", "data"),
+    prevent_initial_call=True,
 )
 def update_progress(n_intervals, already_ready):
-    """Poll background loader and flip to main UI when done."""
+    """Poll background loader and flip to main UI when done.
+
+    This callback only fires while the graph is still loading (the
+    interval is disabled once the graph is ready).  When the graph was
+    loaded from cache, the function layout already serves the ready
+    state, so this callback never fires at all.
+    """
+    if already_ready:
+        return (no_update,) * 10
+
     progress = _get_progress()
 
     bar_style = {
@@ -717,9 +774,8 @@ def inspect_node(node_data: dict | None, ready: bool):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Disable the reloader so the module is only imported once.
-    # Werkzeug's reloader re-imports the module in a child process,
-    # which discards the background thread's work (graph already loaded
-    # in the parent) and resets _graph_state to "not ready".
+    # Start the background loader thread, then the server.
+    # use_reloader=False prevents Werkzeug from re-importing the module
+    # in a child process (which would discard the loaded graph).
     _start_loader_thread()
     app.run(debug=True, use_reloader=False, host="127.0.0.1", port=8050)
