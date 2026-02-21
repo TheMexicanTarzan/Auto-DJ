@@ -12,27 +12,29 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import librosa
 import numpy as np
-import torch
-from transformers import ClapModel, ClapProcessor
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # CLAP model singleton — loaded once, shared across all Song instances.
 # We use laion/clap-htsat-unfused for general-purpose audio embeddings.
+#
+# Heavy libraries (librosa, torch, transformers) are imported lazily inside
+# the functions that need them so that cached-graph startups stay fast.
 # ---------------------------------------------------------------------------
 
-_clap_model: ClapModel | None = None
-_clap_processor: ClapProcessor | None = None
+_clap_model = None
+_clap_processor = None
 
 
-def _get_clap_model() -> tuple[ClapModel, ClapProcessor]:
+def _get_clap_model():
     """Lazy-load the CLAP model and processor on first use."""
     global _clap_model, _clap_processor
 
     if _clap_model is None:
+        from transformers import ClapModel, ClapProcessor
+
         model_name = "laion/clap-htsat-unfused"
         logger.info("Loading CLAP model '%s' (this only happens once)...", model_name)
         _clap_processor = ClapProcessor.from_pretrained(model_name)
@@ -59,6 +61,8 @@ def _estimate_key(y: np.ndarray, sr: int) -> str:
 
     Returns a string like 'C major' or 'A minor'.
     """
+    import librosa
+
     # Compute the chromagram and average across time to get a 12-bin profile
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
     chroma_profile = np.mean(chroma, axis=1)
@@ -137,6 +141,8 @@ class Song:
 
         logger.info("Analysing '%s'...", path.name)
 
+        import librosa
+
         # --- 1. Load audio ------------------------------------------------
         y, sr = librosa.load(str(path), sr=None, mono=True)
 
@@ -172,6 +178,9 @@ class Song:
         The CLAP model expects audio at 48 kHz, so we resample if needed.
         Returns a 1-D numpy array (typically 512 dimensions).
         """
+        import librosa
+        import torch
+
         model, processor = _get_clap_model()
 
         # CLAP expects 48 kHz input
