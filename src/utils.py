@@ -43,7 +43,10 @@ def _file_hash(path: Path, chunk_size: int = 8192) -> str:
     return sha.hexdigest()
 
 
-def scan_directory(directory: str | Path) -> list[Song]:
+def scan_directory(
+    directory: str | Path,
+    progress_callback: callable | None = None,
+) -> list[Song]:
     """
     Recursively scan *directory* for audio files and return a deduplicated
     list of Song objects, each fully analysed (BPM, key, embedding).
@@ -55,6 +58,9 @@ def scan_directory(directory: str | Path) -> list[Song]:
 
     Args:
         directory: Root folder to scan.
+        progress_callback: Optional ``fn(current, total, filename)``
+            invoked after each file is processed (whether success, skip,
+            or failure).  Useful for UI progress reporting.
 
     Returns:
         A list of Song instances, one per unique audio file found.
@@ -75,9 +81,10 @@ def scan_directory(directory: str | Path) -> list[Song]:
         p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
     )
 
-    logger.info("Found %d audio file(s) in '%s'.", len(audio_files), root)
+    total = len(audio_files)
+    logger.info("Found %d audio file(s) in '%s'.", total, root)
 
-    for path in audio_files:
+    for idx, path in enumerate(audio_files, 1):
         # --- Duplicate check (by content hash) ---
         file_hash = _file_hash(path)
         if file_hash in seen_hashes:
@@ -87,6 +94,8 @@ def scan_directory(directory: str | Path) -> list[Song]:
                 seen_hashes[file_hash],
             )
             skipped += 1
+            if progress_callback:
+                progress_callback(idx, total, path.name)
             continue
 
         seen_hashes[file_hash] = path
@@ -97,6 +106,9 @@ def scan_directory(directory: str | Path) -> list[Song]:
             songs.append(song)
         except Exception:
             logger.exception("Failed to analyse '%s', skipping.", path)
+
+        if progress_callback:
+            progress_callback(idx, total, path.name)
 
     logger.info(
         "Scan complete: %d song(s) loaded, %d duplicate(s) skipped.",

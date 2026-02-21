@@ -4,9 +4,11 @@ app.py — Plotly Dash web interface for the DJ Mixing Pathfinding System.
 Run with:
     python app.py
 
-The application loads the mixing graph once at startup (from the JSON
-cache if available, otherwise by scanning SONGS_DIRECTORY), then serves
-an interactive UI where users can:
+The application starts the web server immediately and loads the mixing
+graph in the background (from the JSON cache if available, otherwise by
+scanning SONGS_DIRECTORY).  A progress bar is shown while analysis runs.
+
+Once loaded, users can:
 
     1. Select a start and destination song from searchable dropdowns.
     2. Click "Find Path" to compute the shortest (smoothest) mix path.
@@ -17,11 +19,12 @@ an interactive UI where users can:
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 import dash_cytoscape as cyto
 import networkx as nx
-from dash import Dash, Input, Output, State, callback, html, dcc
+from dash import Dash, Input, Output, State, callback, html, dcc, ctx
 
 from src.config import CACHE_PATH, SONGS_DIRECTORY
 from src.graph import DJGraph
@@ -39,65 +42,114 @@ logging.basicConfig(
 logger = logging.getLogger("auto-dj-web")
 
 # ---------------------------------------------------------------------------
-# Graph initialisation (runs once at import time)
+# Background graph loader
 # ---------------------------------------------------------------------------
 
+# Shared mutable state protected by a lock.
+_graph_lock = threading.Lock()
+_graph_state: dict = {
+    "graph": None,          # DJGraph | None
+    "ready": False,
+    "progress": 0,          # 0-100
+    "total": 0,
+    "current": 0,
+    "current_file": "",
+    "error": None,          # str | None
+}
 
-def _load_graph() -> DJGraph:
-    """Load graph from cache or build from scratch."""
-    if CACHE_PATH.exists():
-        logger.info("Loading graph from cache '%s'...", CACHE_PATH)
-        return DJGraph.load_from_json(CACHE_PATH)
 
-    logger.info("No cache found. Scanning '%s' for audio files...", SONGS_DIRECTORY)
+def _progress_callback(current: int, total: int, filename: str) -> None:
+    with _graph_lock:
+        _graph_state["current"] = current
+        _graph_state["total"] = total
+        _graph_state["current_file"] = filename
+        _graph_state["progress"] = int(current / total * 100) if total else 0
+
+
+def _load_graph_background() -> None:
+    """Load graph in a background thread, updating _graph_state."""
     try:
-        songs = scan_directory(SONGS_DIRECTORY)
-    except (NotADirectoryError, OSError) as exc:
-        logger.warning(
-            "Cannot scan directory: %s. "
-            "Starting with an empty graph — update SONGS_DIRECTORY in src/config.py.",
-            exc,
+        if CACHE_PATH.exists():
+            logger.info("Loading graph from cache '%s'...", CACHE_PATH)
+            graph = DJGraph.load_from_json(CACHE_PATH)
+        else:
+            logger.info(
+                "No cache found. Scanning '%s' for audio files...",
+                SONGS_DIRECTORY,
+            )
+            try:
+                songs = scan_directory(
+                    SONGS_DIRECTORY,
+                    progress_callback=_progress_callback,
+                )
+            except (NotADirectoryError, OSError) as exc:
+                logger.warning(
+                    "Cannot scan directory: %s. "
+                    "Starting with an empty graph — update SONGS_DIRECTORY "
+                    "in src/config.py.",
+                    exc,
+                )
+                songs = []
+
+            if not songs:
+                logger.warning(
+                    "No audio files found in '%s'. "
+                    "Starting with an empty graph — update SONGS_DIRECTORY "
+                    "in src/config.py.",
+                    SONGS_DIRECTORY,
+                )
+
+            logger.info("Building mixing graph from %d track(s)...", len(songs))
+            graph = DJGraph.build(songs)
+            if songs:
+                graph.save_to_json(CACHE_PATH)
+
+        with _graph_lock:
+            _graph_state["graph"] = graph
+            _graph_state["ready"] = True
+            _graph_state["progress"] = 100
+
+        logger.info(
+            "Graph ready: %d node(s), %d edge(s).",
+            graph.num_nodes,
+            graph.num_edges,
         )
-        return DJGraph.build([])
 
-    if not songs:
-        logger.warning(
-            "No audio files found in '%s'. "
-            "Starting with an empty graph — update SONGS_DIRECTORY in src/config.py.",
-            SONGS_DIRECTORY,
-        )
-        return DJGraph.build([])
-
-    logger.info("Building mixing graph from %d track(s)...", len(songs))
-    graph = DJGraph.build(songs)
-    graph.save_to_json(CACHE_PATH)
-    return graph
+    except Exception as exc:
+        logger.exception("Failed to build graph.")
+        with _graph_lock:
+            _graph_state["error"] = str(exc)
 
 
-dj_graph: DJGraph = _load_graph()
-logger.info(
-    "Graph ready: %d node(s), %d edge(s).",
-    dj_graph.num_nodes,
-    dj_graph.num_edges,
-)
+# Start background loading immediately.
+_loader_thread = threading.Thread(target=_load_graph_background, daemon=True)
+_loader_thread.start()
 
 # ---------------------------------------------------------------------------
-# Cytoscape element builders
+# Cytoscape helpers
 # ---------------------------------------------------------------------------
 
-# Maximum edge weight used to scale visual properties.  Edge weights
-# live in [0, 1] so we cap at 1.0 for normalisation.
 _MAX_WEIGHT = 1.0
-
-# Maximum number of neighbours shown in the details panel.
 _TOP_K_NEIGHBOURS = 5
 
 
-def _build_cytoscape_elements() -> list[dict]:
+def _get_graph() -> DJGraph | None:
+    """Return the graph if ready, else None."""
+    with _graph_lock:
+        return _graph_state["graph"] if _graph_state["ready"] else None
+
+
+def _get_progress() -> dict:
+    """Return a snapshot of loading progress."""
+    with _graph_lock:
+        return dict(_graph_state)
+
+
+def _build_cytoscape_elements(graph: DJGraph) -> list[dict]:
     """Convert the DJGraph into Cytoscape node + edge dicts."""
     elements: list[dict] = []
 
-    for song in dj_graph.songs:
+    for song in graph.songs:
         elements.append({
             "data": {
                 "id": song.file_path,
@@ -107,7 +159,7 @@ def _build_cytoscape_elements() -> list[dict]:
             },
         })
 
-    for src, dst, data in dj_graph.graph.edges(data=True):
+    for src, dst, data in graph.graph.edges(data=True):
         w = data["weight"]
         elements.append({
             "data": {
@@ -120,17 +172,6 @@ def _build_cytoscape_elements() -> list[dict]:
 
     return elements
 
-
-_base_elements = _build_cytoscape_elements()
-
-# ---------------------------------------------------------------------------
-# Dropdown options (sorted by filename)
-# ---------------------------------------------------------------------------
-
-_song_options = [
-    {"label": f"{s.filename}  ({s.bpm} BPM, {s.key})", "value": s.file_path}
-    for s in dj_graph.songs
-]
 
 # ---------------------------------------------------------------------------
 # Cytoscape stylesheet
@@ -219,8 +260,17 @@ app.layout = html.Div(
         "margin": "0",
     },
     children=[
+        # Interval timer that polls loading progress
+        dcc.Interval(
+            id="progress-interval",
+            interval=1000,  # 1 second
+            n_intervals=0,
+        ),
+        # Hidden store for graph-ready flag
+        dcc.Store(id="graph-ready", data=False),
         # Header
         html.Div(
+            id="header",
             style={
                 "background": "linear-gradient(135deg, #2d3748, #4a5568)",
                 "padding": "20px 30px",
@@ -232,15 +282,66 @@ app.layout = html.Div(
                     style={"margin": "0", "fontSize": "28px", "color": "#e2e8f0"},
                 ),
                 html.P(
-                    f"{dj_graph.num_nodes} tracks loaded | "
-                    f"{dj_graph.num_edges} possible transitions",
+                    id="header-stats",
+                    children="Loading tracks...",
                     style={"margin": "5px 0 0 0", "color": "#a0aec0", "fontSize": "14px"},
                 ),
             ],
         ),
-        # Main content: sidebar + graph
+        # Loading overlay
         html.Div(
-            style={"display": "flex", "height": "calc(100vh - 90px)"},
+            id="loading-overlay",
+            style={
+                "display": "flex",
+                "flexDirection": "column",
+                "alignItems": "center",
+                "justifyContent": "center",
+                "height": "calc(100vh - 90px)",
+                "padding": "40px",
+            },
+            children=[
+                html.H2(
+                    "Analysing your music library...",
+                    style={"color": "#e2e8f0", "marginBottom": "20px"},
+                ),
+                html.Div(
+                    style={
+                        "width": "60%",
+                        "maxWidth": "500px",
+                        "backgroundColor": "#2d3748",
+                        "borderRadius": "8px",
+                        "overflow": "hidden",
+                        "height": "30px",
+                        "border": "1px solid #4a5568",
+                    },
+                    children=[
+                        html.Div(
+                            id="progress-bar",
+                            style={
+                                "width": "0%",
+                                "height": "100%",
+                                "backgroundColor": "#e53e3e",
+                                "transition": "width 0.5s ease",
+                                "borderRadius": "8px",
+                            },
+                        ),
+                    ],
+                ),
+                html.P(
+                    id="progress-text",
+                    children="Starting up...",
+                    style={
+                        "color": "#a0aec0",
+                        "marginTop": "12px",
+                        "fontSize": "14px",
+                    },
+                ),
+            ],
+        ),
+        # Main content: sidebar + graph (hidden until ready)
+        html.Div(
+            id="main-content",
+            style={"display": "none", "height": "calc(100vh - 90px)"},
             children=[
                 # ---- Left sidebar (controls + details) ----
                 html.Div(
@@ -264,7 +365,7 @@ app.layout = html.Div(
                         ),
                         dcc.Dropdown(
                             id="start-dropdown",
-                            options=_song_options,
+                            options=[],
                             placeholder="Search for a track...",
                             searchable=True,
                             style={
@@ -279,7 +380,7 @@ app.layout = html.Div(
                         ),
                         dcc.Dropdown(
                             id="end-dropdown",
-                            options=_song_options,
+                            options=[],
                             placeholder="Search for a track...",
                             searchable=True,
                             style={
@@ -348,7 +449,7 @@ app.layout = html.Div(
                     children=[
                         cyto.Cytoscape(
                             id="cyto-graph",
-                            elements=_base_elements,
+                            elements=[],
                             layout={"name": "cose", "animate": False},
                             stylesheet=_stylesheet,
                             style={"width": "100%", "height": "100%"},
@@ -364,39 +465,140 @@ app.layout = html.Div(
 )
 
 # ---------------------------------------------------------------------------
-# Callback 1 — Pathfinding
+# Callback — Progress polling + transition to main UI
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("progress-bar", "style"),
+    Output("progress-text", "children"),
+    Output("loading-overlay", "style"),
+    Output("main-content", "style"),
+    Output("header-stats", "children"),
+    Output("cyto-graph", "elements"),
+    Output("start-dropdown", "options"),
+    Output("end-dropdown", "options"),
+    Output("progress-interval", "disabled"),
+    Output("graph-ready", "data"),
+    Input("progress-interval", "n_intervals"),
+    State("graph-ready", "data"),
+)
+def update_progress(n_intervals, already_ready):
+    """Poll background loader and flip to main UI when done."""
+    progress = _get_progress()
+
+    bar_style = {
+        "width": f'{progress["progress"]}%',
+        "height": "100%",
+        "backgroundColor": "#e53e3e",
+        "transition": "width 0.5s ease",
+        "borderRadius": "8px",
+    }
+
+    if progress.get("error"):
+        return (
+            bar_style,
+            f'Error: {progress["error"]}',
+            {"display": "flex", "flexDirection": "column", "alignItems": "center",
+             "justifyContent": "center", "height": "calc(100vh - 90px)", "padding": "40px"},
+            {"display": "none", "height": "calc(100vh - 90px)"},
+            "Error loading tracks",
+            [],
+            [],
+            [],
+            True,
+            False,
+        )
+
+    if progress["ready"]:
+        graph = _get_graph()
+        elements = _build_cytoscape_elements(graph) if graph else []
+        song_options = [
+            {"label": f"{s.filename}  ({s.bpm} BPM, {s.key})", "value": s.file_path}
+            for s in graph.songs
+        ] if graph else []
+        stats = (
+            f"{graph.num_nodes} tracks loaded | "
+            f"{graph.num_edges} possible transitions"
+        ) if graph else "No tracks loaded"
+
+        return (
+            bar_style,
+            "Done!",
+            {"display": "none"},
+            {"display": "flex", "height": "calc(100vh - 90px)"},
+            stats,
+            elements,
+            song_options,
+            song_options,
+            True,   # stop polling
+            True,
+        )
+
+    # Still loading
+    current = progress["current"]
+    total = progress["total"]
+    pct = progress["progress"]
+    fname = progress["current_file"]
+
+    if total > 0:
+        text = f"Analysing track {current} of {total} ({pct}%) — {fname}"
+    else:
+        text = "Scanning for audio files..."
+
+    return (
+        bar_style,
+        text,
+        {"display": "flex", "flexDirection": "column", "alignItems": "center",
+         "justifyContent": "center", "height": "calc(100vh - 90px)", "padding": "40px"},
+        {"display": "none", "height": "calc(100vh - 90px)"},
+        "Loading tracks...",
+        [],
+        [],
+        [],
+        False,
+        False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Callback — Pathfinding
 # ---------------------------------------------------------------------------
 
 
 @callback(
     Output("path-output", "children"),
-    Output("cyto-graph", "elements"),
+    Output("cyto-graph", "elements", allow_duplicate=True),
     Input("find-path-btn", "n_clicks"),
     State("start-dropdown", "value"),
     State("end-dropdown", "value"),
+    State("graph-ready", "data"),
     prevent_initial_call=True,
 )
-def find_path(n_clicks: int, start_fp: str | None, end_fp: str | None):
+def find_path(n_clicks: int, start_fp: str | None, end_fp: str | None, ready: bool):
     """Compute shortest path and highlight it on the graph."""
+    graph = _get_graph()
+    if not graph or not ready:
+        return "Graph is still loading, please wait...", []
+
     if not start_fp or not end_fp:
-        return "Please select both a start and destination song.", _base_elements
+        return "Please select both a start and destination song.", _build_cytoscape_elements(graph)
 
     if start_fp == end_fp:
-        song = dj_graph.get_song(start_fp)
-        # Highlight just the single node
-        elements = _apply_path_classes([start_fp], set())
+        song = graph.get_song(start_fp)
+        elements = _apply_path_classes(graph, [start_fp], set())
         return f"Start and destination are the same track:\n  {song.filename}", elements
 
     try:
-        path, total_cost = dj_graph.get_shortest_path(start_fp, end_fp)
+        path, total_cost = graph.get_shortest_path(start_fp, end_fp)
     except nx.NetworkXNoPath:
         return (
             "No mixable path exists between these two tracks.\n"
             "The BPM gap at every intermediate step is too large.",
-            _base_elements,
+            _build_cytoscape_elements(graph),
         )
     except KeyError as exc:
-        return f"Song not found: {exc}", _base_elements
+        return f"Song not found: {exc}", _build_cytoscape_elements(graph)
 
     # Build text summary
     lines = ["SHORTEST MIX PATH", "=" * 40]
@@ -416,19 +618,21 @@ def find_path(n_clicks: int, start_fp: str | None, end_fp: str | None):
     lines.append("-" * 40)
     lines.append(f"Total cost: {total_cost:.4f}  |  Hops: {len(path) - 1}")
 
-    elements = _apply_path_classes(path_node_ids, path_edge_set)
+    elements = _apply_path_classes(graph, path_node_ids, path_edge_set)
     return "\n".join(lines), elements
 
 
 def _apply_path_classes(
+    graph: DJGraph,
     path_node_ids: list[str],
     path_edge_set: set[tuple[str, str]],
 ) -> list[dict]:
-    """Return a copy of the base elements with path classes applied."""
+    """Return elements with path classes applied."""
+    base = _build_cytoscape_elements(graph)
     path_nodes = set(path_node_ids)
     elements = []
 
-    for el in _base_elements:
+    for el in base:
         new_el = {**el, "data": {**el["data"]}}
         classes = []
 
@@ -451,27 +655,32 @@ def _apply_path_classes(
 
 
 # ---------------------------------------------------------------------------
-# Callback 2 — Node inspection (click a node)
+# Callback — Node inspection (click a node)
 # ---------------------------------------------------------------------------
 
 
 @callback(
     Output("node-details", "children"),
     Input("cyto-graph", "tapNodeData"),
+    State("graph-ready", "data"),
     prevent_initial_call=True,
 )
-def inspect_node(node_data: dict | None):
+def inspect_node(node_data: dict | None, ready: bool):
     """Show metadata and top-K neighbours for a clicked node."""
+    graph = _get_graph()
+    if not graph or not ready:
+        return "Graph is still loading, please wait..."
+
     if node_data is None:
         return "Click a node on the graph to see details."
 
     file_path = node_data["id"]
     try:
-        song = dj_graph.get_song(file_path)
+        song = graph.get_song(file_path)
     except KeyError:
         return f"Unknown node: {file_path}"
 
-    neighbours = dj_graph.neighbours(file_path)
+    neighbours = graph.neighbours(file_path)
     top_k = neighbours[:_TOP_K_NEIGHBOURS]
 
     lines = [
