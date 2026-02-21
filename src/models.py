@@ -184,6 +184,11 @@ class Song:
         with torch.no_grad():
             outputs = model.get_audio_features(**inputs)
 
+        # Newer transformers return a BaseModelOutputWithPooling instead of
+        # a raw tensor.  Extract the projected embedding in that case.
+        if hasattr(outputs, "pooler_output"):
+            outputs = outputs.pooler_output
+
         # Flatten to a plain 1-D numpy vector
         return outputs.squeeze().cpu().numpy()
 
