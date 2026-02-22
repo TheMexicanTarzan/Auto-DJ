@@ -261,19 +261,25 @@ def _make_layout():
 
     When the graph is already loaded (e.g. from the JSON cache), the
     initial HTML is served with the main content *already visible* and
-    the loading overlay hidden.  This eliminates the dependency on a
-    client-side callback to transition from loading → ready, which
-    avoids timing issues across Dash versions.
+    the loading overlay hidden.
+
+    Cytoscape elements are **never** embedded in the initial HTML
+    because large graphs (hundreds of songs, thousands of edges) would
+    bloat the payload, block the browser's main thread, and cause async
+    JS chunks (e.g. dcc.Dropdown) to time out.  Instead, a one-shot
+    ``populate-interval`` fires once after the page renders and a
+    callback fills the graph via a lightweight server round-trip.
     """
     progress = _get_progress()
     graph = _get_graph()
     is_ready = progress["ready"] and graph is not None
 
-    # Pre-compute values when the graph is already loaded
+    # Pre-compute lightweight values when the graph is already loaded.
+    # Heavy data (Cytoscape elements) is loaded via callback to keep
+    # the initial HTML small.
     if is_ready:
         overlay_style = {"display": "none"}
         main_style = {"display": "flex", "height": "calc(100vh - 90px)"}
-        elements = _build_cytoscape_elements(graph)
         song_options = [
             {"label": f"{s.filename}  ({s.bpm} BPM, {s.key})", "value": s.file_path}
             for s in graph.songs
@@ -282,10 +288,13 @@ def _make_layout():
             f"{graph.num_nodes} tracks loaded | "
             f"{graph.num_edges} possible transitions"
         )
-        interval_disabled = True
+        progress_interval_disabled = True
         bar_width = "100%"
         progress_text = "Done!"
         ready_flag = True
+        # One-shot interval to populate Cytoscape elements after page
+        # renders (keeps initial HTML small).
+        populate_disabled = False
     else:
         overlay_style = {
             "display": "flex",
@@ -296,13 +305,15 @@ def _make_layout():
             "padding": "40px",
         }
         main_style = {"display": "none", "height": "calc(100vh - 90px)"}
-        elements = []
         song_options = []
         stats_text = "Loading tracks..."
-        interval_disabled = False
+        progress_interval_disabled = False
         bar_width = f'{progress["progress"]}%'
         progress_text = "Starting up..."
         ready_flag = False
+        # Elements will be populated by update_progress when the graph
+        # finishes loading, so the one-shot interval is not needed.
+        populate_disabled = True
 
     return html.Div(
         style={
@@ -314,12 +325,21 @@ def _make_layout():
             "margin": "0",
         },
         children=[
-            # Interval timer that polls loading progress
+            # Interval timer that polls loading progress (1 s)
             dcc.Interval(
                 id="progress-interval",
                 interval=1000,
                 n_intervals=0,
-                disabled=interval_disabled,
+                disabled=progress_interval_disabled,
+            ),
+            # One-shot interval that populates Cytoscape elements after
+            # the page has rendered (fires once, 200 ms after load).
+            dcc.Interval(
+                id="populate-interval",
+                interval=200,
+                n_intervals=0,
+                max_intervals=1,
+                disabled=populate_disabled,
             ),
             # Hidden store for graph-ready flag
             dcc.Store(id="graph-ready", data=ready_flag),
@@ -497,7 +517,7 @@ def _make_layout():
                         children=[
                             cyto.Cytoscape(
                                 id="cyto-graph",
-                                elements=elements,
+                                elements=[],
                                 layout={"name": "cose", "animate": False},
                                 stylesheet=_stylesheet,
                                 style={"width": "100%", "height": "100%"},
@@ -517,6 +537,30 @@ app.layout = _make_layout
 
 
 # ---------------------------------------------------------------------------
+# Callback — One-shot element population (fires once after page render)
+# ---------------------------------------------------------------------------
+
+
+@callback(
+    Output("cyto-graph", "elements"),
+    Input("populate-interval", "n_intervals"),
+    State("graph-ready", "data"),
+    prevent_initial_call=True,
+)
+def populate_elements(n_intervals, ready):
+    """Fill the Cytoscape graph after the page has rendered.
+
+    Triggered once by the ``populate-interval`` (200 ms after load).
+    Keeping elements out of the initial HTML avoids a massive payload
+    that would block the browser and cause async-chunk timeouts.
+    """
+    if not ready:
+        return no_update
+    graph = _get_graph()
+    return _build_cytoscape_elements(graph) if graph else []
+
+
+# ---------------------------------------------------------------------------
 # Callback — Progress polling + transition to main UI
 # ---------------------------------------------------------------------------
 
@@ -527,7 +571,7 @@ app.layout = _make_layout
     Output("loading-overlay", "style"),
     Output("main-content", "style"),
     Output("header-stats", "children"),
-    Output("cyto-graph", "elements"),
+    Output("cyto-graph", "elements", allow_duplicate=True),
     Output("start-dropdown", "options"),
     Output("end-dropdown", "options"),
     Output("progress-interval", "disabled"),
