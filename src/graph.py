@@ -3,13 +3,13 @@ graph.py — Mixing graph and pathfinding for the DJ Mixing Pathfinding System.
 
 This is the final piece of the pipeline.  It takes the fully-analysed Song
 objects and the transition-cost function from metrics.py, wires them into a
-weighted directed graph via NetworkX, and exposes Dijkstra-based pathfinding
+weighted directed graph via igraph, and exposes Dijkstra-based pathfinding
 so we can answer: "What is the smoothest sequence of transitions from
 Song A to Song B?"
 
 Architecture
 ------------
-    Songs  ──►  DJGraph.build()  ──►  NetworkX DiGraph
+    Songs  ──►  DJGraph.build()  ──►  igraph DiGraph
                                           │
                    query ──►  get_shortest_path(src, dst)
                                           │
@@ -39,7 +39,7 @@ import math
 from itertools import permutations
 from pathlib import Path
 
-import networkx as nx
+import igraph
 import numpy as np
 
 from src.metrics import calculate_weight, is_compatible
@@ -48,19 +48,25 @@ from src.models import Song
 logger = logging.getLogger(__name__)
 
 
+class NoPathError(Exception):
+    """Raised when no finite-cost path exists between two songs."""
+
+
 class DJGraph:
     """
     A weighted directed graph where nodes are songs and edge weights
     represent transition cost (lower = smoother mix).
 
     Attributes:
-        graph:    The underlying NetworkX DiGraph.
+        graph:    The underlying igraph Graph (directed).
         _songs:   Lookup dict mapping file_path → Song for quick access.
+        _layout:  Cached 2D layout coordinates {file_path: (x, y)}.
     """
 
     def __init__(self) -> None:
-        self.graph: nx.DiGraph = nx.DiGraph()
+        self.graph: igraph.Graph = igraph.Graph(directed=True)
         self._songs: dict[str, Song] = {}
+        self._layout: dict[str, tuple[float, float]] = {}
 
     # ------------------------------------------------------------------
     # Construction
@@ -97,16 +103,15 @@ class DJGraph:
         instance = cls()
         instance._add_songs(songs)
         instance._add_edges(weights=weights)
+        instance.compute_layout()
         return instance
 
     def _add_songs(self, songs: list[Song]) -> None:
         """Register each song as a node, storing it in our lookup dict."""
         for song in songs:
             self._songs[song.file_path] = song
-            # Attach song metadata to the node so NetworkX visualisation
-            # tools can display it if needed.
-            self.graph.add_node(
-                song.file_path,
+            self.graph.add_vertex(
+                name=song.file_path,
                 filename=song.filename,
                 bpm=song.bpm,
                 key=song.key,
@@ -131,6 +136,9 @@ class DJGraph:
         skipped = 0
         songs = list(self._songs.values())
 
+        edge_list: list[tuple[str, str]] = []
+        weight_list: list[float] = []
+
         for song_a, song_b in permutations(songs, 2):
             # Fast BPM gate — skip pairs that are clearly unmixable
             # before computing the expensive harmonic/semantic metrics.
@@ -144,18 +152,55 @@ class DJGraph:
                 skipped += 1
                 continue
 
-            self.graph.add_edge(
-                song_a.file_path,
-                song_b.file_path,
-                weight=cost,
-            )
+            edge_list.append((song_a.file_path, song_b.file_path))
+            weight_list.append(cost)
             edge_count += 1
+
+        if edge_list:
+            self.graph.add_edges(edge_list)
+            self.graph.es["weight"] = weight_list
 
         logger.info(
             "Added %d edge(s) to the graph (%d unmixable pair(s) skipped).",
             edge_count,
             skipped,
         )
+
+    # ------------------------------------------------------------------
+    # Layout computation
+    # ------------------------------------------------------------------
+
+    def compute_layout(
+        self, algorithm: str = "fruchterman_reingold",
+    ) -> dict[str, tuple[float, float]]:
+        """
+        Compute 2D layout coordinates using an igraph layout algorithm.
+
+        Args:
+            algorithm: Layout algorithm name (e.g. 'fruchterman_reingold',
+                       'kamada_kawai', 'drl', 'lgl').
+
+        Returns:
+            Dict mapping file_path → (x, y) coordinates.
+        """
+        if self.graph.vcount() == 0:
+            self._layout = {}
+            return self._layout
+
+        layout = self.graph.layout(algorithm)
+
+        self._layout = {}
+        for v in self.graph.vs:
+            self._layout[v["name"]] = (layout[v.index][0], layout[v.index][1])
+
+        return self._layout
+
+    @property
+    def layout_coords(self) -> dict[str, tuple[float, float]]:
+        """Cached layout coordinates. Computed on first access if needed."""
+        if not self._layout and self.graph.vcount() > 0:
+            self.compute_layout()
+        return self._layout
 
     # ------------------------------------------------------------------
     # Serialization (caching)
@@ -166,9 +211,9 @@ class DJGraph:
         Serialize the graph to a JSON file.
 
         The JSON structure stores every Song's metadata and embedding
-        (as a plain list) plus the full adjacency list with weights,
-        allowing the graph to be reconstructed without re-scanning
-        audio files.
+        (as a plain list) plus the full adjacency list with weights
+        and layout coordinates, allowing the graph to be reconstructed
+        without re-scanning audio files.
         """
         path = Path(path)
 
@@ -183,14 +228,20 @@ class DJGraph:
             })
 
         edges_data = []
-        for src, dst, data in self.graph.edges(data=True):
+        for edge in self.graph.es:
             edges_data.append({
-                "source": src,
-                "target": dst,
-                "weight": data["weight"],
+                "source": self.graph.vs[edge.source]["name"],
+                "target": self.graph.vs[edge.target]["name"],
+                "weight": edge["weight"],
             })
 
-        payload = {"songs": songs_data, "edges": edges_data}
+        layout_data = {k: list(v) for k, v in self.layout_coords.items()}
+
+        payload = {
+            "songs": songs_data,
+            "edges": edges_data,
+            "layout": layout_data,
+        }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         logger.info("Graph saved to '%s'.", path)
 
@@ -219,16 +270,25 @@ class DJGraph:
                 embedding=np.array(s["embedding"], dtype=np.float32),
             )
             instance._songs[song.file_path] = song
-            instance.graph.add_node(
-                song.file_path,
+            instance.graph.add_vertex(
+                name=song.file_path,
                 filename=song.filename,
                 bpm=song.bpm,
                 key=song.key,
             )
 
         # Rebuild directed edges.
-        for e in raw["edges"]:
-            instance.graph.add_edge(e["source"], e["target"], weight=e["weight"])
+        if raw["edges"]:
+            edge_list = [(e["source"], e["target"]) for e in raw["edges"]]
+            weight_list = [e["weight"] for e in raw["edges"]]
+            instance.graph.add_edges(edge_list)
+            instance.graph.es["weight"] = weight_list
+
+        # Restore layout if present, otherwise compute it.
+        if "layout" in raw and raw["layout"]:
+            instance._layout = {k: tuple(v) for k, v in raw["layout"].items()}
+        else:
+            instance.compute_layout()
 
         logger.info(
             "Graph loaded from '%s': %d node(s), %d edge(s).",
@@ -279,8 +339,7 @@ class DJGraph:
         Dijkstra's algorithm is the right choice here because:
           - All edge weights are non-negative (costs are in [0, 1]).
           - We want the single-source shortest path, not all-pairs.
-          - NetworkX's implementation runs in O((V + E) log V) with a
-            min-heap, which is efficient for our graph sizes.
+          - igraph's C-based implementation is highly optimised.
 
         Args:
             source_id: file_path or filename of the starting track.
@@ -292,32 +351,46 @@ class DJGraph:
               - total_cost is the sum of edge weights along that path.
 
         Raises:
-            KeyError:  If source or target is not in the graph.
-            nx.NetworkXNoPath:  If no finite-cost route exists between
-                                the two songs (e.g. tempo gap is too large
-                                at every intermediate step).
+            KeyError:      If source or target is not in the graph.
+            NoPathError:   If no finite-cost route exists between
+                           the two songs.
         """
         source = self.get_song(source_id)
         target = self.get_song(target_id)
 
-        # Dijkstra returns the list of node IDs (file_paths) on the
-        # shortest path.  The 'weight' parameter tells it which edge
-        # attribute to minimise.
-        node_path = nx.dijkstra_path(
-            self.graph,
-            source=source.file_path,
-            target=target.file_path,
-            weight="weight",
-        )
-        total_cost = nx.dijkstra_path_length(
-            self.graph,
-            source=source.file_path,
-            target=target.file_path,
-            weight="weight",
+        src_v = self.graph.vs.find(name=source.file_path)
+        tgt_v = self.graph.vs.find(name=target.file_path)
+
+        # Self-path: zero cost, single node
+        if src_v.index == tgt_v.index:
+            return [source], 0.0
+
+        # If no edges exist, there is definitely no path
+        if self.graph.ecount() == 0:
+            raise NoPathError(
+                f"No path between '{source.filename}' and '{target.filename}'"
+            )
+
+        paths = self.graph.get_shortest_paths(
+            src_v.index,
+            to=tgt_v.index,
+            weights="weight",
+            output="vpath",
         )
 
-        # Convert node IDs back to Song objects
-        song_path = [self._songs[fp] for fp in node_path]
+        if not paths or not paths[0]:
+            raise NoPathError(
+                f"No path between '{source.filename}' and '{target.filename}'"
+            )
+
+        node_indices = paths[0]
+        song_path = [self._songs[self.graph.vs[i]["name"]] for i in node_indices]
+
+        # Compute total cost from edge weights
+        total_cost = 0.0
+        for i in range(len(node_indices) - 1):
+            eid = self.graph.get_eid(node_indices[i], node_indices[i + 1])
+            total_cost += self.graph.es[eid]["weight"]
 
         return song_path, total_cost
 
@@ -327,11 +400,11 @@ class DJGraph:
 
     @property
     def num_nodes(self) -> int:
-        return self.graph.number_of_nodes()
+        return self.graph.vcount()
 
     @property
     def num_edges(self) -> int:
-        return self.graph.number_of_edges()
+        return self.graph.ecount()
 
     @property
     def songs(self) -> list[Song]:
@@ -342,10 +415,14 @@ class DJGraph:
         """Return the weight of a specific edge, or inf if no edge exists."""
         src = self.get_song(source_id)
         dst = self.get_song(target_id)
-        try:
-            return self.graph[src.file_path][dst.file_path]["weight"]
-        except KeyError:
+        src_v = self.graph.vs.find(name=src.file_path)
+        dst_v = self.graph.vs.find(name=dst.file_path)
+        eid = self.graph.get_eid(
+            src_v.index, dst_v.index, directed=True, error=False,
+        )
+        if eid < 0:
             return float("inf")
+        return self.graph.es[eid]["weight"]
 
     def neighbours(self, song_id: str) -> list[tuple[Song, float]]:
         """
@@ -353,7 +430,10 @@ class DJGraph:
         sorted by transition cost (cheapest first).
         """
         song = self.get_song(song_id)
+        v = self.graph.vs.find(name=song.file_path)
         result = []
-        for _, neighbour_fp, data in self.graph.edges(song.file_path, data=True):
-            result.append((self._songs[neighbour_fp], data["weight"]))
+        for eid in self.graph.incident(v, mode="out"):
+            edge = self.graph.es[eid]
+            target_v = self.graph.vs[edge.target]
+            result.append((self._songs[target_v["name"]], edge["weight"]))
         return sorted(result, key=lambda x: x[1])

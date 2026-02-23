@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import math
 
-import networkx as nx
 import numpy as np
 import pytest
 
-from src.graph import DJGraph
+from src.graph import DJGraph, NoPathError
 from src.models import Song
 
 
@@ -84,10 +83,10 @@ class TestGraphBuild:
         s = _song("meta.mp3", bpm=140, key="D minor")
         g = DJGraph.build([s])
 
-        node_data = g.graph.nodes[s.file_path]
-        assert node_data["filename"] == "meta.mp3"
-        assert node_data["bpm"] == 140
-        assert node_data["key"] == "D minor"
+        v = g.graph.vs.find(name=s.file_path)
+        assert v["filename"] == "meta.mp3"
+        assert v["bpm"] == 140
+        assert v["key"] == "D minor"
 
     def test_edge_weight_is_finite_and_positive(self):
         a = _song("x.mp3", bpm=125, key="A minor", embedding=_SHARED_EMB)
@@ -160,12 +159,12 @@ class TestShortestPath:
         assert path[2].filename == "c.mp3"
 
     def test_no_path_raises(self):
-        """Completely disconnected songs should raise NetworkXNoPath."""
+        """Completely disconnected songs should raise NoPathError."""
         a = _song("island_a.mp3", bpm=80, embedding=_SHARED_EMB)
         b = _song("island_b.mp3", bpm=160, embedding=_SHARED_EMB)
         g = DJGraph.build([a, b])
 
-        with pytest.raises(nx.NetworkXNoPath):
+        with pytest.raises(NoPathError):
             g.get_shortest_path("island_a.mp3", "island_b.mp3")
 
     def test_path_to_self(self):

@@ -12,7 +12,7 @@ Once loaded, users can:
 
     1. Select a start and destination song from searchable dropdowns.
     2. Click "Find Path" to compute the shortest (smoothest) mix path.
-    3. See the path highlighted on a Cytoscape graph visualisation.
+    3. See the path highlighted on a Plotly graph visualisation.
     4. Click any node to inspect its top-5 nearest neighbours.
 """
 
@@ -22,12 +22,11 @@ import logging
 import threading
 from pathlib import Path
 
-import dash_cytoscape as cyto
-import networkx as nx
+import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, html, dcc, ctx, no_update
 
 from src.config import CACHE_PATH, SONGS_DIRECTORY
-from src.graph import DJGraph
+from src.graph import DJGraph, NoPathError
 from src.metrics import calculate_weight
 from src.utils import scan_directory
 
@@ -131,7 +130,7 @@ def _start_loader_thread() -> None:
     thread.start()
 
 # ---------------------------------------------------------------------------
-# Cytoscape helpers
+# Plotly figure helpers
 # ---------------------------------------------------------------------------
 
 _MAX_WEIGHT = 1.0
@@ -150,103 +149,152 @@ def _get_progress() -> dict:
         return dict(_graph_state)
 
 
-def _build_cytoscape_elements(graph: DJGraph) -> list[dict]:
-    """Convert the DJGraph into Cytoscape node + edge dicts."""
-    elements: list[dict] = []
+def _empty_figure() -> go.Figure:
+    """Return an empty Plotly figure with dark styling."""
+    fig = go.Figure()
+    fig.update_layout(
+        showlegend=False,
+        plot_bgcolor="#1a202c",
+        paper_bgcolor="#1a202c",
+        margin=dict(l=0, r=0, t=0, b=0),
+        xaxis=dict(
+            showgrid=False, zeroline=False,
+            showticklabels=False, showline=False,
+        ),
+        yaxis=dict(
+            showgrid=False, zeroline=False,
+            showticklabels=False, showline=False,
+        ),
+    )
+    return fig
+
+
+def _build_plotly_figure(
+    graph: DJGraph,
+    path_node_ids: list[str] | None = None,
+    path_edge_set: set[tuple[str, str]] | None = None,
+) -> go.Figure:
+    """Build a Plotly figure with go.Scattergl node and edge traces."""
+    if graph.num_nodes == 0:
+        return _empty_figure()
+
+    coords = graph.layout_coords
+    path_nodes = set(path_node_ids) if path_node_ids else set()
+    path_edges = path_edge_set or set()
+
+    # ---- Edges ----
+    edge_x: list[float | None] = []
+    edge_y: list[float | None] = []
+    pedge_x: list[float | None] = []
+    pedge_y: list[float | None] = []
+
+    for edge in graph.graph.es:
+        src_name = graph.graph.vs[edge.source]["name"]
+        dst_name = graph.graph.vs[edge.target]["name"]
+        x0, y0 = coords[src_name]
+        x1, y1 = coords[dst_name]
+
+        if (src_name, dst_name) in path_edges:
+            pedge_x.extend([x0, x1, None])
+            pedge_y.extend([y0, y1, None])
+        else:
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+
+    # ---- Nodes ----
+    node_x, node_y, node_text, node_ids = [], [], [], []
+    pnode_x, pnode_y, pnode_text, pnode_ids = [], [], [], []
 
     for song in graph.songs:
-        elements.append({
-            "data": {
-                "id": song.file_path,
-                "label": song.filename,
-                "bpm": song.bpm,
-                "key": song.key,
-            },
-        })
+        x, y = coords[song.file_path]
+        text = f"{song.filename}<br>BPM: {song.bpm} | Key: {song.key}"
 
-    for src, dst, data in graph.graph.edges(data=True):
-        w = data["weight"]
-        elements.append({
-            "data": {
-                "source": src,
-                "target": dst,
-                "weight": round(w, 4),
-                "norm_weight": min(w / _MAX_WEIGHT, 1.0),
-            },
-        })
+        if song.file_path in path_nodes:
+            pnode_x.append(x)
+            pnode_y.append(y)
+            pnode_text.append(text)
+            pnode_ids.append(song.file_path)
+        else:
+            node_x.append(x)
+            node_y.append(y)
+            node_text.append(text)
+            node_ids.append(song.file_path)
 
-    return elements
+    fig = go.Figure()
 
+    # Regular edges
+    if edge_x:
+        fig.add_trace(go.Scattergl(
+            x=edge_x, y=edge_y,
+            mode="lines",
+            line=dict(color="#cbd5e0", width=0.5),
+            opacity=0.3,
+            hoverinfo="none",
+            showlegend=False,
+        ))
 
-# ---------------------------------------------------------------------------
-# Cytoscape stylesheet
-# ---------------------------------------------------------------------------
+    # Regular nodes
+    if node_x:
+        fig.add_trace(go.Scattergl(
+            x=node_x, y=node_y,
+            mode="markers",
+            marker=dict(
+                size=8,
+                color="#6c7a89",
+                line=dict(width=1, color="#4a5568"),
+            ),
+            text=node_text,
+            customdata=node_ids,
+            hoverinfo="text",
+            showlegend=False,
+        ))
 
-_stylesheet = [
-    # Default node
-    {
-        "selector": "node",
-        "style": {
-            "label": "data(label)",
-            "background-color": "#6c7a89",
-            "color": "#ffffff",
-            "font-size": "10px",
-            "text-valign": "bottom",
-            "text-halign": "center",
-            "width": 30,
-            "height": 30,
-            "border-width": 2,
-            "border-color": "#4a5568",
-        },
-    },
-    # Default edge
-    {
-        "selector": "edge",
-        "style": {
-            "width": 1,
-            "line-color": "#cbd5e0",
-            "target-arrow-color": "#cbd5e0",
-            "target-arrow-shape": "triangle",
-            "curve-style": "bezier",
-            "opacity": 0.3,
-        },
-    },
-    # Highlighted path node
-    {
-        "selector": ".path-node",
-        "style": {
-            "background-color": "#e53e3e",
-            "border-color": "#c53030",
-            "border-width": 3,
-            "width": 40,
-            "height": 40,
-            "font-weight": "bold",
-            "font-size": "12px",
-            "color": "#ffffff",
-            "z-index": 10,
-        },
-    },
-    # Highlighted path edge
-    {
-        "selector": ".path-edge",
-        "style": {
-            "line-color": "#e53e3e",
-            "target-arrow-color": "#e53e3e",
-            "width": 3,
-            "opacity": 1.0,
-            "z-index": 10,
-        },
-    },
-    # Selected / clicked node
-    {
-        "selector": ":selected",
-        "style": {
-            "background-color": "#3182ce",
-            "border-color": "#2b6cb0",
-            "border-width": 3,
-        },
-    },
-]
+    # Highlighted path edges
+    if pedge_x:
+        fig.add_trace(go.Scattergl(
+            x=pedge_x, y=pedge_y,
+            mode="lines",
+            line=dict(color="#e53e3e", width=3),
+            opacity=1.0,
+            hoverinfo="none",
+            showlegend=False,
+        ))
+
+    # Highlighted path nodes
+    if pnode_x:
+        fig.add_trace(go.Scattergl(
+            x=pnode_x, y=pnode_y,
+            mode="markers",
+            marker=dict(
+                size=14,
+                color="#e53e3e",
+                line=dict(width=2, color="#c53030"),
+            ),
+            text=pnode_text,
+            customdata=pnode_ids,
+            hoverinfo="text",
+            showlegend=False,
+        ))
+
+    fig.update_layout(
+        showlegend=False,
+        plot_bgcolor="#1a202c",
+        paper_bgcolor="#1a202c",
+        margin=dict(l=0, r=0, t=0, b=0),
+        xaxis=dict(
+            showgrid=False, zeroline=False,
+            showticklabels=False, showline=False,
+            scaleanchor="y", scaleratio=1,
+        ),
+        yaxis=dict(
+            showgrid=False, zeroline=False,
+            showticklabels=False, showline=False,
+        ),
+        hovermode="closest",
+    )
+
+    return fig
+
 
 # ---------------------------------------------------------------------------
 # Dash app + dynamic layout
@@ -263,19 +311,15 @@ def _make_layout():
     initial HTML is served with the main content *already visible* and
     the loading overlay hidden.
 
-    Cytoscape elements are **never** embedded in the initial HTML
-    because large graphs (hundreds of songs, thousands of edges) would
-    bloat the payload, block the browser's main thread, and cause async
-    JS chunks (e.g. dcc.Dropdown) to time out.  Instead, a one-shot
-    ``populate-interval`` fires once after the page renders and a
-    callback fills the graph via a lightweight server round-trip.
+    The Plotly figure is populated via a one-shot ``populate-interval``
+    callback to keep the initial HTML payload small.
     """
     progress = _get_progress()
     graph = _get_graph()
     is_ready = progress["ready"] and graph is not None
 
     # Pre-compute lightweight values when the graph is already loaded.
-    # Heavy data (Cytoscape elements) is loaded via callback to keep
+    # Heavy data (Plotly figure) is loaded via callback to keep
     # the initial HTML small.
     if is_ready:
         overlay_style = {"display": "none"}
@@ -292,7 +336,7 @@ def _make_layout():
         bar_width = "100%"
         progress_text = "Done!"
         ready_flag = True
-        # One-shot interval to populate Cytoscape elements after page
+        # One-shot interval to populate the figure after page
         # renders (keeps initial HTML small).
         populate_disabled = False
     else:
@@ -311,7 +355,7 @@ def _make_layout():
         bar_width = f'{progress["progress"]}%'
         progress_text = "Starting up..."
         ready_flag = False
-        # Elements will be populated by update_progress when the graph
+        # Figure will be populated by update_progress when the graph
         # finishes loading, so the one-shot interval is not needed.
         populate_disabled = True
 
@@ -332,7 +376,7 @@ def _make_layout():
                 n_intervals=0,
                 disabled=progress_interval_disabled,
             ),
-            # One-shot interval that populates Cytoscape elements after
+            # One-shot interval that populates the figure after
             # the page has rendered (fires once, 200 ms after load).
             dcc.Interval(
                 id="populate-interval",
@@ -515,15 +559,14 @@ def _make_layout():
                     html.Div(
                         style={"flex": "1", "position": "relative"},
                         children=[
-                            cyto.Cytoscape(
-                                id="cyto-graph",
-                                elements=[],
-                                layout={"name": "cose", "animate": False},
-                                stylesheet=_stylesheet,
+                            dcc.Graph(
+                                id="graph-display",
+                                figure=_empty_figure(),
                                 style={"width": "100%", "height": "100%"},
-                                minZoom=0.2,
-                                maxZoom=3.0,
-                                responsive=True,
+                                config={
+                                    "scrollZoom": True,
+                                    "displayModeBar": False,
+                                },
                             ),
                         ],
                     ),
@@ -537,27 +580,27 @@ app.layout = _make_layout
 
 
 # ---------------------------------------------------------------------------
-# Callback — One-shot element population (fires once after page render)
+# Callback — One-shot figure population (fires once after page render)
 # ---------------------------------------------------------------------------
 
 
 @callback(
-    Output("cyto-graph", "elements"),
+    Output("graph-display", "figure"),
     Input("populate-interval", "n_intervals"),
     State("graph-ready", "data"),
     prevent_initial_call=True,
 )
-def populate_elements(n_intervals, ready):
-    """Fill the Cytoscape graph after the page has rendered.
+def populate_figure(n_intervals, ready):
+    """Fill the Plotly graph after the page has rendered.
 
     Triggered once by the ``populate-interval`` (200 ms after load).
-    Keeping elements out of the initial HTML avoids a massive payload
+    Keeping the figure out of the initial HTML avoids a massive payload
     that would block the browser and cause async-chunk timeouts.
     """
     if not ready:
         return no_update
     graph = _get_graph()
-    return _build_cytoscape_elements(graph) if graph else []
+    return _build_plotly_figure(graph) if graph else _empty_figure()
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +614,7 @@ def populate_elements(n_intervals, ready):
     Output("loading-overlay", "style"),
     Output("main-content", "style"),
     Output("header-stats", "children"),
-    Output("cyto-graph", "elements", allow_duplicate=True),
+    Output("graph-display", "figure", allow_duplicate=True),
     Output("start-dropdown", "options"),
     Output("end-dropdown", "options"),
     Output("progress-interval", "disabled"),
@@ -609,7 +652,7 @@ def update_progress(n_intervals, already_ready):
              "justifyContent": "center", "height": "calc(100vh - 90px)", "padding": "40px"},
             {"display": "none", "height": "calc(100vh - 90px)"},
             "Error loading tracks",
-            [],
+            _empty_figure(),
             [],
             [],
             True,
@@ -618,7 +661,7 @@ def update_progress(n_intervals, already_ready):
 
     if progress["ready"]:
         graph = _get_graph()
-        elements = _build_cytoscape_elements(graph) if graph else []
+        figure = _build_plotly_figure(graph) if graph else _empty_figure()
         song_options = [
             {"label": f"{s.filename}  ({s.bpm} BPM, {s.key})", "value": s.file_path}
             for s in graph.songs
@@ -634,7 +677,7 @@ def update_progress(n_intervals, already_ready):
             {"display": "none"},
             {"display": "flex", "height": "calc(100vh - 90px)"},
             stats,
-            elements,
+            figure,
             song_options,
             song_options,
             True,   # stop polling
@@ -661,7 +704,7 @@ def update_progress(n_intervals, already_ready):
          "justifyContent": "center", "height": "calc(100vh - 90px)", "padding": "40px"},
         {"display": "none", "height": "calc(100vh - 90px)"},
         "Loading tracks...",
-        [],
+        _empty_figure(),
         [],
         [],
         False,
@@ -676,7 +719,7 @@ def update_progress(n_intervals, already_ready):
 
 @callback(
     Output("path-output", "children"),
-    Output("cyto-graph", "elements", allow_duplicate=True),
+    Output("graph-display", "figure", allow_duplicate=True),
     Input("find-path-btn", "n_clicks"),
     State("start-dropdown", "value"),
     State("end-dropdown", "value"),
@@ -687,26 +730,26 @@ def find_path(n_clicks: int, start_fp: str | None, end_fp: str | None, ready: bo
     """Compute shortest path and highlight it on the graph."""
     graph = _get_graph()
     if not graph or not ready:
-        return "Graph is still loading, please wait...", []
+        return "Graph is still loading, please wait...", _empty_figure()
 
     if not start_fp or not end_fp:
-        return "Please select both a start and destination song.", _build_cytoscape_elements(graph)
+        return "Please select both a start and destination song.", _build_plotly_figure(graph)
 
     if start_fp == end_fp:
         song = graph.get_song(start_fp)
-        elements = _apply_path_classes(graph, [start_fp], set())
-        return f"Start and destination are the same track:\n  {song.filename}", elements
+        figure = _build_plotly_figure(graph, path_node_ids=[start_fp])
+        return f"Start and destination are the same track:\n  {song.filename}", figure
 
     try:
         path, total_cost = graph.get_shortest_path(start_fp, end_fp)
-    except nx.NetworkXNoPath:
+    except NoPathError:
         return (
             "No mixable path exists between these two tracks.\n"
             "The BPM gap at every intermediate step is too large.",
-            _build_cytoscape_elements(graph),
+            _build_plotly_figure(graph),
         )
     except KeyError as exc:
-        return f"Song not found: {exc}", _build_cytoscape_elements(graph)
+        return f"Song not found: {exc}", _build_plotly_figure(graph)
 
     # Build text summary
     lines = ["SHORTEST MIX PATH", "=" * 40]
@@ -726,40 +769,8 @@ def find_path(n_clicks: int, start_fp: str | None, end_fp: str | None, ready: bo
     lines.append("-" * 40)
     lines.append(f"Total cost: {total_cost:.4f}  |  Hops: {len(path) - 1}")
 
-    elements = _apply_path_classes(graph, path_node_ids, path_edge_set)
-    return "\n".join(lines), elements
-
-
-def _apply_path_classes(
-    graph: DJGraph,
-    path_node_ids: list[str],
-    path_edge_set: set[tuple[str, str]],
-) -> list[dict]:
-    """Return elements with path classes applied."""
-    base = _build_cytoscape_elements(graph)
-    path_nodes = set(path_node_ids)
-    elements = []
-
-    for el in base:
-        new_el = {**el, "data": {**el["data"]}}
-        classes = []
-
-        if "source" not in el["data"]:
-            # Node
-            if el["data"]["id"] in path_nodes:
-                classes.append("path-node")
-        else:
-            # Edge
-            edge_key = (el["data"]["source"], el["data"]["target"])
-            if edge_key in path_edge_set:
-                classes.append("path-edge")
-
-        if classes:
-            new_el["classes"] = " ".join(classes)
-
-        elements.append(new_el)
-
-    return elements
+    figure = _build_plotly_figure(graph, path_node_ids, path_edge_set)
+    return "\n".join(lines), figure
 
 
 # ---------------------------------------------------------------------------
@@ -769,20 +780,26 @@ def _apply_path_classes(
 
 @callback(
     Output("node-details", "children"),
-    Input("cyto-graph", "tapNodeData"),
+    Input("graph-display", "clickData"),
     State("graph-ready", "data"),
     prevent_initial_call=True,
 )
-def inspect_node(node_data: dict | None, ready: bool):
+def inspect_node(click_data: dict | None, ready: bool):
     """Show metadata and top-K neighbours for a clicked node."""
     graph = _get_graph()
     if not graph or not ready:
         return "Graph is still loading, please wait..."
 
-    if node_data is None:
+    if click_data is None:
         return "Click a node on the graph to see details."
 
-    file_path = node_data["id"]
+    # Extract file_path from the clicked point's customdata.
+    # Edge traces have no customdata, so we skip those clicks.
+    point = click_data["points"][0]
+    file_path = point.get("customdata")
+    if not file_path:
+        return "Click a node on the graph to see details."
+
     try:
         song = graph.get_song(file_path)
     except KeyError:

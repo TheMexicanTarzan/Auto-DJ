@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from src.config import CACHE_PATH
-from src.graph import DJGraph
+from src.graph import DJGraph, NoPathError
 from src.metrics import calculate_weight
 from src.utils import scan_directory
 
@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError as exc:
         logger.error("%s", exc)
         return 1
-    except Exception as exc:
+    except NoPathError as exc:
         logger.error("No path found: %s", exc)
         return 1
 
