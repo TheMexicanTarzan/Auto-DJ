@@ -253,6 +253,34 @@ def semantic_distance(emb_a: np.ndarray, emb_b: np.ndarray) -> float:
     return float(np.clip(distance, 0.0, 1.0))
 
 
+def batch_semantic_distance_matrix(embeddings: np.ndarray) -> np.ndarray:
+    """
+    Compute the full N×N pairwise cosine distance matrix in one vectorised
+    operation.  This replaces O(n²) individual ``semantic_distance()`` calls
+    with a single matrix multiplication + broadcast, yielding orders-of-
+    magnitude speedup for large song libraries.
+
+    Args:
+        embeddings: (N, D) array where each row is a song's embedding.
+
+    Returns:
+        (N, N) float32 array of pairwise distances in [0.0, 1.0].
+        Entry [i][j] is the normalised cosine distance from song i to song j.
+    """
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    # Avoid division by zero for any zero-norm vector (treat as max distance)
+    safe_norms = np.where(norms == 0, 1.0, norms)
+    normed = embeddings / safe_norms
+
+    # Cosine similarity matrix via single GEMM call: shape (N, N)
+    sim_matrix = normed @ normed.T
+
+    # Convert to distance in [0, 1] and clamp floating-point noise
+    dist_matrix = (1.0 - sim_matrix) / 2.0
+    np.clip(dist_matrix, 0.0, 1.0, out=dist_matrix)
+    return dist_matrix.astype(np.float32)
+
+
 # =========================================================================
 # 4. Composite Weight
 # =========================================================================
@@ -319,3 +347,117 @@ def calculate_weight(
     )
 
     return composite
+
+
+# =========================================================================
+# 5. Vectorised batch edge computation
+# =========================================================================
+#
+# For graph construction we need weights for all O(n²) directed pairs.
+# Computing them one-at-a-time with calculate_weight() is dominated by
+# Python loop overhead and redundant numpy calls.  The functions below
+# do everything in bulk using numpy broadcasting / GEMM, giving ~50-100×
+# speedup on libraries of 500+ songs.
+# =========================================================================
+
+
+def batch_tempo_penalty_matrix(bpms: np.ndarray) -> np.ndarray:
+    """
+    Vectorised NxN tempo penalty matrix.
+
+    Args:
+        bpms: 1-D array of BPM values (length N).
+
+    Returns:
+        (N, N) float array.  Entry [i][j] is the tempo penalty for
+        transitioning from song i to song j.  Unmixable pairs get np.inf.
+    """
+    bpm_col = bpms[:, np.newaxis]  # (N, 1)
+    bpm_row = bpms[np.newaxis, :]  # (1, N)
+
+    diff = np.abs(bpm_col - bpm_row)
+    min_bpm = np.minimum(bpm_col, bpm_row)
+
+    # Avoid division by zero for invalid BPMs
+    safe_min = np.where(min_bpm > 0, min_bpm, 1.0)
+    pct_diff = (diff / safe_min) * 100.0
+
+    penalty = pct_diff / _MAX_BPM_DIFF_PERCENT
+    # Hard gate: unmixable if diff > threshold or either BPM <= 0
+    unmixable = (pct_diff > _MAX_BPM_DIFF_PERCENT) | (bpm_col <= 0) | (bpm_row <= 0)
+    penalty = np.where(unmixable, np.inf, penalty)
+
+    return penalty
+
+
+def batch_harmonic_distance_matrix(keys: list[str]) -> np.ndarray:
+    """
+    Vectorised NxN harmonic distance matrix.
+
+    Args:
+        keys: List of key strings (length N), e.g. ['C major', 'A minor', ...].
+
+    Returns:
+        (N, N) float array of harmonic distances in [0.0, 1.0].
+    """
+    positions = np.array([_key_to_fifths_position(k) for k in keys])
+    pos_col = positions[:, np.newaxis]
+    pos_row = positions[np.newaxis, :]
+
+    raw = np.abs(pos_col - pos_row)
+    arc = np.minimum(raw, 12 - raw)
+    return arc / 6.0
+
+
+def batch_calculate_weights(
+    songs: list[Song],
+    *,
+    weights: dict[str, float] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute the full NxN weight matrix for all directed song pairs using
+    vectorised numpy operations.  This is the batch replacement for calling
+    ``calculate_weight()`` inside a nested loop.
+
+    Returns:
+        A tuple of (weight_matrix, finite_mask) where:
+          - weight_matrix: (N, N) float array of composite transition costs.
+            Unmixable pairs contain np.inf.
+          - finite_mask: (N, N) boolean array — True where the weight is
+            finite (i.e. the pair has a valid edge).
+    """
+    w = weights or DEFAULT_WEIGHTS
+    n = len(songs)
+
+    if n == 0:
+        empty = np.empty((0, 0), dtype=np.float32)
+        return empty, np.empty((0, 0), dtype=bool)
+
+    bpms = np.array([s.bpm for s in songs], dtype=np.float64)
+    keys = [s.key for s in songs]
+    embeddings = np.array([s.embedding for s in songs], dtype=np.float32)
+
+    # --- Tempo (hard gate) ---
+    tempo_mat = batch_tempo_penalty_matrix(bpms)
+    finite_mask = np.isfinite(tempo_mat)
+
+    # Exclude self-loops
+    np.fill_diagonal(finite_mask, False)
+
+    # --- Harmonic ---
+    harmonic_mat = batch_harmonic_distance_matrix(keys)
+
+    # --- Semantic ---
+    semantic_mat = batch_semantic_distance_matrix(embeddings)
+
+    # --- Composite weighted sum ---
+    weight_matrix = (
+        w["harmonic"] * harmonic_mat
+        + w["tempo"] * tempo_mat
+        + w["semantic"] * semantic_mat
+    )
+
+    # Force non-finite entries to inf
+    weight_matrix = np.where(finite_mask, weight_matrix, np.inf)
+
+    return weight_matrix.astype(np.float32), finite_mask

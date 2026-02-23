@@ -76,24 +76,31 @@ def _estimate_key(y: np.ndarray, sr: int) -> str:
         [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
     )
 
-    best_corr = -2.0
-    best_key = "C major"
+    # Vectorized: build all 12 shifted chroma profiles at once (12×12 matrix)
+    # Each row is np.roll(chroma_profile, -shift) for shift in 0..11
+    indices = np.arange(12)
+    shifted_chromas = np.array([chroma_profile[(indices + s) % 12] for s in range(12)])
 
-    # Try every possible root note (0–11) for both major and minor
-    for shift in range(12):
-        shifted_chroma = np.roll(chroma_profile, -shift)
+    # Standardise each row (zero mean, unit variance) for Pearson correlation
+    def _row_correlations(matrix: np.ndarray, ref: np.ndarray) -> np.ndarray:
+        """Pearson correlation of each row in *matrix* against *ref*."""
+        m_centered = matrix - matrix.mean(axis=1, keepdims=True)
+        r_centered = ref - ref.mean()
+        numer = m_centered @ r_centered
+        denom = np.sqrt((m_centered ** 2).sum(axis=1)) * np.sqrt((r_centered ** 2).sum())
+        # Guard against zero denominator (constant profile — extremely unlikely)
+        return np.where(denom > 0, numer / denom, 0.0)
 
-        major_corr = float(np.corrcoef(shifted_chroma, major_profile)[0, 1])
-        if major_corr > best_corr:
-            best_corr = major_corr
-            best_key = f"{_PITCH_CLASSES[shift]} major"
+    major_corrs = _row_correlations(shifted_chromas, major_profile)  # shape (12,)
+    minor_corrs = _row_correlations(shifted_chromas, minor_profile)  # shape (12,)
 
-        minor_corr = float(np.corrcoef(shifted_chroma, minor_profile)[0, 1])
-        if minor_corr > best_corr:
-            best_corr = minor_corr
-            best_key = f"{_PITCH_CLASSES[shift]} minor"
+    # Find the best among all 24 candidates
+    all_corrs = np.concatenate([major_corrs, minor_corrs])  # shape (24,)
+    best_idx = int(np.argmax(all_corrs))
+    shift = best_idx % 12
+    mode = "major" if best_idx < 12 else "minor"
 
-    return best_key
+    return f"{_PITCH_CLASSES[shift]} {mode}"
 
 
 # ---------------------------------------------------------------------------
