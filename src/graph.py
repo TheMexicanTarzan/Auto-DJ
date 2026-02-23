@@ -171,7 +171,7 @@ class DJGraph:
     # ------------------------------------------------------------------
 
     def compute_layout(
-        self, algorithm: str = "fruchterman_reingold",
+        self, algorithm: str = "kamada_kawai",
     ) -> dict[str, tuple[float, float]]:
         """
         Compute 2D layout coordinates using an igraph layout algorithm.
