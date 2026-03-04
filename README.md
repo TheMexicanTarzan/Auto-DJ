@@ -60,8 +60,8 @@ print(f"Total cost: {cost:.4f}")
 ## How It Works
 
 1. **Audio Loading** — Files are loaded via `librosa` (mono, native sample rate).
-2. **BPM Detection** — Tempo is estimated with librosa's beat tracker.
-3. **Key Detection** — Musical key is derived from chroma features using the Krumhansl-Schmuckler algorithm.
+2. **BPM & Beat Detection** — Tempo, beat grid, and downbeat locations are estimated with `madmom`'s RNN-based downbeat processor + Dynamic Bayesian Network decoder.
+3. **Key Detection** — Musical key and scale are estimated with `essentia`'s KeyExtractor algorithm.
 4. **Embedding** — Each track is passed through the `laion/clap-htsat-unfused` CLAP model to produce a 512-dimensional vector representing its sonic character.
 5. **Deduplication** — The directory scanner hashes file contents (SHA-256) to skip byte-identical duplicates.
 6. **Transition Cost** — Each ordered pair of songs is scored by combining harmonic distance (Circle of Fifths), tempo penalty (8% threshold), and cosine distance between embeddings.

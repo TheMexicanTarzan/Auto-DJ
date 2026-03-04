@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 # CLAP model singleton — loaded once, shared across all Song instances.
 # We use laion/clap-htsat-unfused for general-purpose audio embeddings.
 #
-# Heavy libraries (librosa, torch, transformers) are imported lazily inside
-# the functions that need them so that cached-graph startups stay fast.
+# Heavy libraries (librosa, madmom, essentia, torch, transformers) are
+# imported lazily inside the functions that need them so that cached-graph
+# startups stay fast.
 # ---------------------------------------------------------------------------
 
 _clap_model = None
@@ -45,62 +46,96 @@ def _get_clap_model():
 
 
 # ---------------------------------------------------------------------------
-# Key detection helper
+# Key detection helper  (Essentia KeyExtractor)
 # ---------------------------------------------------------------------------
 
-# Mapping from Librosa's pitch-class indices to musical key names.
-# Index 0 = C, 1 = C#, ... 11 = B.  We append 'major' or 'minor'
-# based on whichever profile correlates more strongly.
+# Canonical pitch-class names used throughout the application (sharp notation).
 _PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+# Essentia may return flat notation (e.g. "Bb"); normalise to sharps so that
+# downstream code (_SEMITONE_INDEX in metrics.py) always receives a known name.
+_FLAT_TO_SHARP: dict[str, str] = {
+    "Db": "C#",
+    "Eb": "D#",
+    "Gb": "F#",
+    "Ab": "G#",
+    "Bb": "A#",
+}
 
 
 def _estimate_key(y: np.ndarray, sr: int) -> str:
     """
-    Estimate the musical key of an audio signal using chroma features
-    and the Krumhansl-Schmuckler key-finding algorithm.
+    Estimate the musical key of an audio signal using Essentia's
+    ``KeyExtractor`` algorithm.
 
-    Returns a string like 'C major' or 'A minor'.
+    Returns a string like ``'C major'`` or ``'A minor'``.
     """
-    import librosa
+    import essentia.standard as es
 
-    # Compute the chromagram and average across time to get a 12-bin profile
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-    chroma_profile = np.mean(chroma, axis=1)
+    key_extractor = es.KeyExtractor(sampleRate=float(sr))
+    key, scale, _strength = key_extractor(y.astype(np.float32))
 
-    # Krumhansl-Kessler key profiles (how strongly each pitch class
-    # correlates with a given key in major vs minor tonality)
-    major_profile = np.array(
-        [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+    # Normalise flat notation → sharp notation
+    key = _FLAT_TO_SHARP.get(key, key)
+
+    return f"{key} {scale}"
+
+
+# ---------------------------------------------------------------------------
+# Beat / downbeat detection helper  (madmom RNN + DBN)
+# ---------------------------------------------------------------------------
+
+
+def _detect_beats_and_downbeats(
+    path: str | Path,
+) -> tuple[float, list[float], list[float]]:
+    """
+    Detect BPM, the full beat grid, and downbeat ("1") locations using
+    ``madmom``'s RNN-based downbeat processor followed by a Dynamic
+    Bayesian Network decoder.
+
+    Args:
+        path: Path to the audio file.
+
+    Returns:
+        bpm:            Estimated tempo in beats per minute (derived from
+                        the median inter-beat interval).
+        beat_times:     List of *all* beat times in seconds.
+        downbeat_times: List of downbeat times (beat position == 1) in
+                        seconds — critical for DJ phrasing.
+    """
+    from madmom.features.downbeats import (
+        DBNDownBeatTrackingProcessor,
+        RNNDownBeatProcessor,
     )
-    minor_profile = np.array(
-        [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
-    )
 
-    # Vectorized: build all 12 shifted chroma profiles at once (12×12 matrix)
-    # Each row is np.roll(chroma_profile, -shift) for shift in 0..11
-    indices = np.arange(12)
-    shifted_chromas = np.array([chroma_profile[(indices + s) % 12] for s in range(12)])
+    # RNNDownBeatProcessor handles its own audio loading internally.
+    proc = RNNDownBeatProcessor()
+    activations = proc(str(path))
 
-    # Standardise each row (zero mean, unit variance) for Pearson correlation
-    def _row_correlations(matrix: np.ndarray, ref: np.ndarray) -> np.ndarray:
-        """Pearson correlation of each row in *matrix* against *ref*."""
-        m_centered = matrix - matrix.mean(axis=1, keepdims=True)
-        r_centered = ref - ref.mean()
-        numer = m_centered @ r_centered
-        denom = np.sqrt((m_centered ** 2).sum(axis=1)) * np.sqrt((r_centered ** 2).sum())
-        # Guard against zero denominator (constant profile — extremely unlikely)
-        return np.where(denom > 0, numer / denom, 0.0)
+    # DBN decoder: support both 3/4 and 4/4 time signatures.
+    dbn = DBNDownBeatTrackingProcessor(beats_per_bar=[3, 4], fps=100)
+    beats = dbn(activations)
 
-    major_corrs = _row_correlations(shifted_chromas, major_profile)  # shape (12,)
-    minor_corrs = _row_correlations(shifted_chromas, minor_profile)  # shape (12,)
+    if len(beats) == 0:
+        return 0.0, [], []
 
-    # Find the best among all 24 candidates
-    all_corrs = np.concatenate([major_corrs, minor_corrs])  # shape (24,)
-    best_idx = int(np.argmax(all_corrs))
-    shift = best_idx % 12
-    mode = "major" if best_idx < 12 else "minor"
+    # ``beats`` is an N×2 array: [[time_seconds, beat_position], ...]
+    # beat_position 1 = downbeat, 2 = second beat, etc.
+    beat_times: list[float] = beats[:, 0].tolist()
+    downbeat_times: list[float] = [
+        float(row[0]) for row in beats if int(round(row[1])) == 1
+    ]
 
-    return f"{_PITCH_CLASSES[shift]} {mode}"
+    # Derive BPM from the median inter-beat interval.
+    if len(beat_times) >= 2:
+        intervals = np.diff(beat_times)
+        median_interval = float(np.median(intervals))
+        bpm = 60.0 / median_interval if median_interval > 0 else 0.0
+    else:
+        bpm = 0.0
+
+    return bpm, beat_times, downbeat_times
 
 
 # ---------------------------------------------------------------------------
@@ -114,11 +149,14 @@ class Song:
     Represents a single audio track in the DJ library.
 
     Attributes:
-        file_path:  Absolute path to the audio file on disk.
-        filename:   Just the file name (e.g. 'track.mp3').
-        bpm:        Estimated tempo in beats per minute.
-        key:        Estimated musical key (e.g. 'A minor').
-        embedding:  512-dim CLAP embedding capturing the track's sonic character.
+        file_path:       Absolute path to the audio file on disk.
+        filename:        Just the file name (e.g. 'track.mp3').
+        bpm:             Estimated tempo in beats per minute.
+        key:             Estimated musical key (e.g. 'A minor').
+        embedding:       512-dim CLAP embedding capturing the track's sonic character.
+        beat_times:      List of all detected beat times in seconds.
+        downbeat_times:  List of downbeat ("1") times in seconds — essential
+                         for DJ phrasing and phrase-aligned mixing.
     """
 
     file_path: str
@@ -126,6 +164,8 @@ class Song:
     bpm: float = 0.0
     key: str = ""
     embedding: np.ndarray = field(default_factory=lambda: np.array([]))
+    beat_times: list[float] = field(default_factory=list)
+    downbeat_times: list[float] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Factory method — the primary way to create a Song from a file
@@ -138,9 +178,10 @@ class Song:
 
         Steps:
             1. Load the audio with librosa (mono, native sample rate).
-            2. Estimate BPM via librosa's beat tracker.
-            3. Estimate the musical key via chroma analysis.
-            4. Extract a CLAP embedding for semantic similarity.
+            2. Validate the audio (reject files that are too short or silent).
+            3. Estimate BPM, beat grid, and downbeats via madmom.
+            4. Estimate the musical key via Essentia's KeyExtractor.
+            5. Extract a CLAP embedding for semantic similarity.
         """
         path = Path(path).resolve()
         if not path.is_file():
@@ -148,20 +189,32 @@ class Song:
 
         logger.info("Analysing '%s'...", path.name)
 
-        import librosa
+        import librosa  # kept for audio I/O only
 
         # --- 1. Load audio ------------------------------------------------
         y, sr = librosa.load(str(path), sr=None, mono=True)
 
-        # --- 2. Tempo estimation ------------------------------------------
-        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-        # librosa may return an ndarray; ensure we get a plain float
-        bpm = float(np.atleast_1d(tempo)[0])
+        # --- 2. Validate audio --------------------------------------------
+        duration = len(y) / sr
+        if duration < 1.0:
+            raise ValueError(
+                f"Audio too short ({duration:.2f}s): {path.name}. "
+                "At least 1 second of audio is required."
+            )
 
-        # --- 3. Key estimation --------------------------------------------
+        rms = float(np.sqrt(np.mean(y**2)))
+        if rms < 1e-4:
+            raise ValueError(
+                f"Audio appears to be silent (RMS={rms:.6f}): {path.name}"
+            )
+
+        # --- 3. Beat / tempo detection (madmom) --------------------------
+        bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(path)
+
+        # --- 4. Key estimation (Essentia) ---------------------------------
         key = _estimate_key(y, sr)
 
-        # --- 4. CLAP embedding --------------------------------------------
+        # --- 5. CLAP embedding --------------------------------------------
         embedding = cls._compute_embedding(y, sr)
 
         return cls(
@@ -170,6 +223,8 @@ class Song:
             bpm=round(bpm, 2),
             key=key,
             embedding=embedding,
+            beat_times=beat_times,
+            downbeat_times=downbeat_times,
         )
 
     # ------------------------------------------------------------------
@@ -185,7 +240,7 @@ class Song:
         The CLAP model expects audio at 48 kHz, so we resample if needed.
         Returns a 1-D numpy array (typically 512 dimensions).
         """
-        import librosa
+        import librosa  # kept for resampling (I/O utility)
         import torch
 
         model, processor = _get_clap_model()

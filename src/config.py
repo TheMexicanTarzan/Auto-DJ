@@ -16,7 +16,7 @@ _PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 # startup (or from the JSON cache if it already exists).
 SONGS_DIRECTORY: str = os.environ.get(
     "SONGS_DIRECTORY",
-    str(_PROJECT_ROOT / "music"),
+    str(_PROJECT_ROOT / ".." /'Playlists'),
 )
 
 # Disk cache for the serialised graph.  If this file exists the app
