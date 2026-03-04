@@ -137,14 +137,19 @@ def _detect_beats_and_downbeats(
     proc = RNNDownBeatProcessor()
     activations = proc(str(path))
 
-    # DBN decoder: try both 3/4 and 4/4 separately (NumPy 2.x compatibility)
+    # DBN decoder: try both 3/4 and 4/4 separately (NumPy 2.x compat).
+    # Passing beats_per_bar=[3, 4] triggers a bug in madmom with newer
+    # NumPy (np.asarray fails on inhomogeneous result arrays), so we
+    # run each meter separately and keep whichever yields more beats.
     results = []
     for bpb in [3, 4]:
-        dbn = DBNDownBeatTrackingProcessor(beats_per_bar=[bpb], fps=100)
-        beats_candidate = dbn(activations)
-        if len(beats_candidate) > 0:
-            # Score based on number of beats detected
-            results.append((beats_candidate, len(beats_candidate)))
+        try:
+            dbn = DBNDownBeatTrackingProcessor(beats_per_bar=[bpb], fps=100)
+            beats_candidate = dbn(activations)
+            if len(beats_candidate) > 0:
+                results.append((beats_candidate, len(beats_candidate)))
+        except Exception:
+            continue
 
     if not results:
         return 0.0, [], []
