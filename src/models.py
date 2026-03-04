@@ -104,7 +104,7 @@ def _detect_beats_and_downbeats(
         downbeat_times: List of downbeat times (beat position == 1) in
                         seconds — critical for DJ phrasing.
     """
-    from madmom.features.beats import (
+    from madmom.features.downbeats import (
         DBNDownBeatTrackingProcessor,
         RNNDownBeatProcessor,
     )
