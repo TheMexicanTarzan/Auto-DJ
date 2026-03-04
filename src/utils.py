@@ -10,10 +10,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import Pool
 from pathlib import Path
 
-from src.models import Song
+from src.models import Song, analyse_audio, compute_embeddings_batch
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,20 @@ def _file_hash(path: Path, chunk_size: int = 65_536) -> str:
     return sha.hexdigest()
 
 
+def _analyse_one(path_str: str) -> tuple | None:
+    """
+    Wrapper for multiprocessing: analyse a single audio file.
+
+    Returns an AudioAnalysis on success, None on failure.
+    Must be a top-level function for pickling.
+    """
+    try:
+        return analyse_audio(path_str)
+    except Exception:
+        logger.exception("Failed to analyse '%s', skipping.", path_str)
+        return None
+
+
 def scan_directory(
     directory: str | Path,
     progress_callback: callable | None = None,
@@ -59,10 +73,14 @@ def scan_directory(
         encounter and log a warning for the duplicate.
 
     Parallelism:
-        Audio analysis is the dominant cost.  After the (fast, sequential)
-        deduplication pass, unique files are analysed in parallel using a
-        thread pool.  The CLAP model and librosa release the GIL during
-        their C/CUDA kernels, so threads provide genuine concurrency here.
+        Audio analysis is split into two phases:
+        - Phase 2a: BPM + key detection run in a multiprocessing pool
+          (CPU-bound librosa work benefits from true parallelism).
+          Workers are capped at 3 to limit memory (each child loads
+          audio into memory independently).
+        - Phase 2b: CLAP embeddings are computed in the main process
+          using batched forward passes (avoids duplicating the ~600 MB
+          model across worker processes).
 
     Args:
         directory: Root folder to scan.
@@ -106,38 +124,58 @@ def scan_directory(
         seen_hashes[file_hash] = path
         unique_paths.append(path)
 
-    # --- Phase 2: parallel audio analysis ---
-    # Use min of CPU count and unique files to avoid over-subscription.
-    # Cap at 4 workers — each analysis loads a full audio file into memory
-    # and the CLAP model is shared, so more threads increase contention.
-    max_workers = min(4, len(unique_paths), os.cpu_count() or 1)
-    songs: list[Song] = []
+    # --- Phase 2a: parallel BPM + key analysis (multiprocessing) ---
+    # Cap at 3 workers — each child loads full audio into memory and
+    # librosa / numpy are CPU-bound, so true parallelism helps.
+    max_workers = min(3, len(unique_paths), os.cpu_count() or 1)
+    analyses = []
+
+    path_strs = [str(p) for p in unique_paths]
 
     if max_workers <= 1 or len(unique_paths) <= 1:
         # Fall back to sequential for trivial cases (avoids pool overhead)
-        for idx, path in enumerate(unique_paths, 1):
-            try:
-                songs.append(Song.from_file(path))
-            except Exception:
-                logger.exception("Failed to analyse '%s', skipping.", path)
+        for idx, path_str in enumerate(path_strs, 1):
+            result = _analyse_one(path_str)
+            if result is not None:
+                analyses.append(result)
             if progress_callback:
-                progress_callback(idx + skipped, total, path.name)
+                progress_callback(idx + skipped, total, Path(path_str).name)
     else:
-        # Map futures → original index so we can report progress in order
         completed = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            future_to_path = {
-                pool.submit(Song.from_file, p): p for p in unique_paths
-            }
-            for future in as_completed(future_to_path):
-                path = future_to_path[future]
+        with Pool(processes=max_workers) as pool:
+            for result in pool.imap_unordered(_analyse_one, path_strs):
                 completed += 1
-                try:
-                    songs.append(future.result())
-                except Exception:
-                    logger.exception("Failed to analyse '%s', skipping.", path)
+                if result is not None:
+                    analyses.append(result)
+                fname = result.filename if result is not None else "unknown"
                 if progress_callback:
-                    progress_callback(completed + skipped, total, path.name)
+                    progress_callback(completed + skipped, total, fname)
+
+    if not analyses:
+        logger.info(
+            "Scan complete: 0 song(s) loaded, %d duplicate(s) skipped.",
+            skipped,
+        )
+        return []
+
+    # --- Phase 2b: batch CLAP embeddings (main process) ---
+    logger.info(
+        "Computing CLAP embeddings for %d track(s) in batches...",
+        len(analyses),
+    )
+    audio_list = [(a.audio, a.sr) for a in analyses]
+    embeddings = compute_embeddings_batch(audio_list, batch_size=8)
+
+    # --- Build Song objects ---
+    songs: list[Song] = []
+    for analysis, embedding in zip(analyses, embeddings):
+        songs.append(Song(
+            file_path=analysis.file_path,
+            filename=analysis.filename,
+            bpm=analysis.bpm,
+            key=analysis.key,
+            embedding=embedding,
+        ))
 
     logger.info(
         "Scan complete: %d song(s) loaded, %d duplicate(s) skipped.",

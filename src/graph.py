@@ -36,6 +36,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import pickle
 from pathlib import Path
 
 import igraph
@@ -300,6 +301,101 @@ class DJGraph:
             instance.graph.es["weight"] = weight_list
 
         # Restore layout if present, otherwise compute it.
+        if "layout" in raw and raw["layout"]:
+            instance._layout = {k: tuple(v) for k, v in raw["layout"].items()}
+        else:
+            instance.compute_layout()
+
+        logger.info(
+            "Graph loaded from '%s': %d node(s), %d edge(s).",
+            path,
+            instance.num_nodes,
+            instance.num_edges,
+        )
+        return instance
+
+    # ------------------------------------------------------------------
+    # Pickle serialization (faster binary format)
+    # ------------------------------------------------------------------
+
+    def save_to_pickle(self, path: str | Path) -> None:
+        """
+        Serialize the graph to a pickle file.
+
+        Pickle natively handles numpy arrays without conversion, making
+        it ~10x faster than JSON for cache load/save.
+        """
+        path = Path(path)
+
+        songs_data = []
+        for song in self._songs.values():
+            songs_data.append({
+                "file_path": song.file_path,
+                "filename": song.filename,
+                "bpm": song.bpm,
+                "key": song.key,
+                "embedding": song.embedding,
+            })
+
+        edges_data = []
+        for edge in self.graph.es:
+            edges_data.append({
+                "source": self.graph.vs[edge.source]["name"],
+                "target": self.graph.vs[edge.target]["name"],
+                "weight": edge["weight"],
+            })
+
+        layout_data = {k: v for k, v in self.layout_coords.items()}
+
+        payload = {
+            "songs": songs_data,
+            "edges": edges_data,
+            "layout": layout_data,
+        }
+
+        with open(path, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        logger.info("Graph saved to '%s'.", path)
+
+    @classmethod
+    def load_from_pickle(cls, path: str | Path) -> DJGraph:
+        """
+        Reconstruct a DJGraph from a pickle cache file previously
+        written by ``save_to_pickle()``.
+        """
+        path = Path(path)
+        with open(path, "rb") as f:
+            raw = pickle.load(f)  # noqa: S301
+
+        instance = cls()
+
+        song_list = []
+        for s in raw["songs"]:
+            emb = np.asarray(s["embedding"], dtype=np.float32)
+            song = Song(
+                file_path=s["file_path"],
+                filename=s["filename"],
+                bpm=s["bpm"],
+                key=s["key"],
+                embedding=emb,
+            )
+            instance._songs[song.file_path] = song
+            instance._filename_index[song.filename] = song
+            song_list.append(song)
+
+        if song_list:
+            instance.graph.add_vertices(len(song_list))
+            instance.graph.vs["name"] = [s.file_path for s in song_list]
+            instance.graph.vs["filename"] = [s.filename for s in song_list]
+            instance.graph.vs["bpm"] = [s.bpm for s in song_list]
+            instance.graph.vs["key"] = [s.key for s in song_list]
+
+        if raw["edges"]:
+            edge_list = [(e["source"], e["target"]) for e in raw["edges"]]
+            weight_list = [e["weight"] for e in raw["edges"]]
+            instance.graph.add_edges(edge_list)
+            instance.graph.es["weight"] = weight_list
+
         if "layout" in raw and raw["layout"]:
             instance._layout = {k: tuple(v) for k, v in raw["layout"].items()}
         else:

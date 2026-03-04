@@ -22,7 +22,7 @@ import logging
 import sys
 from pathlib import Path
 
-from src.config import CACHE_PATH
+from src.config import CACHE_PATH, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
 from src.metrics import calculate_weight
 from src.utils import scan_directory
@@ -81,7 +81,12 @@ def main(argv: list[str] | None = None) -> int:
     # --- 1. Load from cache or scan & build --------------------------------
     if CACHE_PATH.exists():
         logger.info("Loading graph from cache '%s'...", CACHE_PATH)
-        dj_graph = DJGraph.load_from_json(CACHE_PATH)
+        dj_graph = DJGraph.load_from_pickle(CACHE_PATH)
+    elif _LEGACY_JSON_CACHE.exists():
+        logger.info("Migrating legacy JSON cache to pickle...")
+        dj_graph = DJGraph.load_from_json(_LEGACY_JSON_CACHE)
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        dj_graph.save_to_pickle(CACHE_PATH)
     else:
         logger.info("Scanning '%s' for audio files...", args.directory)
         songs = scan_directory(args.directory)
@@ -97,7 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         dj_graph = DJGraph.build(songs)
 
         # --- Save to cache for future runs --------------------------------
-        dj_graph.save_to_json(CACHE_PATH)
+        CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        dj_graph.save_to_pickle(CACHE_PATH)
 
     logger.info(
         "Graph ready: %d node(s), %d edge(s).",

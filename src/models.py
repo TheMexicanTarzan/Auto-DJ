@@ -11,10 +11,21 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+class AudioAnalysis(NamedTuple):
+    """Intermediate result from audio analysis (before CLAP embedding)."""
+    file_path: str
+    filename: str
+    bpm: float
+    key: str
+    audio: np.ndarray  # mono waveform at 22050 Hz
+    sr: int
 
 # ---------------------------------------------------------------------------
 # CLAP model singleton — loaded once, shared across all Song instances.
@@ -103,6 +114,94 @@ def _estimate_key(y: np.ndarray, sr: int) -> str:
     return f"{_PITCH_CLASSES[shift]} {mode}"
 
 
+def analyse_audio(path: str | Path) -> AudioAnalysis:
+    """
+    Load an audio file and compute BPM + key (no CLAP embedding).
+
+    This is a top-level function so it can be pickled for use with
+    multiprocessing.Pool.  The CLAP embedding step is deliberately
+    excluded — it runs in the main process via batch inference.
+    """
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Audio file not found: {path}")
+
+    import librosa
+
+    logger.info("Analysing '%s'...", path.name)
+
+    y, sr = librosa.load(str(path), sr=22050, mono=True)
+
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    bpm = float(np.atleast_1d(tempo)[0])
+
+    key = _estimate_key(y, sr)
+
+    return AudioAnalysis(
+        file_path=str(path),
+        filename=path.name,
+        bpm=round(bpm, 2),
+        key=key,
+        audio=y,
+        sr=sr,
+    )
+
+
+def compute_embeddings_batch(
+    audio_list: list[tuple[np.ndarray, int]],
+    batch_size: int = 8,
+) -> list[np.ndarray]:
+    """
+    Compute CLAP embeddings for multiple audio signals in batched
+    forward passes.
+
+    Args:
+        audio_list: List of (waveform, sample_rate) tuples.
+        batch_size: Number of audio signals per forward pass.
+
+    Returns:
+        List of 1-D numpy arrays (one 512-dim embedding per input).
+    """
+    if not audio_list:
+        return []
+
+    import librosa
+    import torch
+
+    model, processor = _get_clap_model()
+    target_sr = 48_000
+
+    # Resample all audio to 48 kHz (CLAP's expected rate)
+    resampled = []
+    for y, sr in audio_list:
+        if sr != target_sr:
+            y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+        resampled.append(y)
+
+    embeddings: list[np.ndarray] = []
+
+    for i in range(0, len(resampled), batch_size):
+        batch = resampled[i : i + batch_size]
+        inputs = processor(
+            audios=batch,
+            sampling_rate=target_sr,
+            return_tensors="pt",
+            padding=True,
+        )
+        with torch.no_grad():
+            outputs = model.get_audio_features(**inputs)
+
+        if hasattr(outputs, "pooler_output"):
+            outputs = outputs.pooler_output
+
+        # outputs shape: (batch, 512) — split into individual vectors
+        batch_embs = outputs.cpu().numpy()
+        for j in range(batch_embs.shape[0]):
+            embeddings.append(batch_embs[j])
+
+    return embeddings
+
+
 # ---------------------------------------------------------------------------
 # Song dataclass
 # ---------------------------------------------------------------------------
@@ -137,7 +236,7 @@ class Song:
         Analyse an audio file and return a fully-populated Song instance.
 
         Steps:
-            1. Load the audio with librosa (mono, native sample rate).
+            1. Load the audio with librosa (mono, 22050 Hz).
             2. Estimate BPM via librosa's beat tracker.
             3. Estimate the musical key via chroma analysis.
             4. Extract a CLAP embedding for semantic similarity.
@@ -151,7 +250,7 @@ class Song:
         import librosa
 
         # --- 1. Load audio ------------------------------------------------
-        y, sr = librosa.load(str(path), sr=None, mono=True)
+        y, sr = librosa.load(str(path), sr=22050, mono=True)
 
         # --- 2. Tempo estimation ------------------------------------------
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)

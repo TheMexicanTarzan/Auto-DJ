@@ -5,7 +5,7 @@ Run with:
     python app.py
 
 The application starts the web server immediately and loads the mixing
-graph in the background (from the JSON cache if available, otherwise by
+graph in the background (from the pickle cache if available, otherwise by
 scanning SONGS_DIRECTORY).  A progress bar is shown while analysis runs.
 
 Once loaded, users can:
@@ -25,7 +25,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, callback, html, dcc, ctx, no_update
 
-from src.config import CACHE_PATH, SONGS_DIRECTORY
+from src.config import CACHE_PATH, SONGS_DIRECTORY, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
 from src.metrics import calculate_weight
 from src.utils import scan_directory
@@ -73,7 +73,18 @@ def _load_graph_background() -> None:
             with _graph_lock:
                 _graph_state["current_file"] = "cache"
                 _graph_state["progress"] = 50
-            graph = DJGraph.load_from_json(CACHE_PATH)
+            graph = DJGraph.load_from_pickle(CACHE_PATH)
+        elif _LEGACY_JSON_CACHE.exists():
+            logger.info(
+                "Migrating legacy JSON cache '%s' to pickle...",
+                _LEGACY_JSON_CACHE,
+            )
+            with _graph_lock:
+                _graph_state["current_file"] = "cache"
+                _graph_state["progress"] = 50
+            graph = DJGraph.load_from_json(_LEGACY_JSON_CACHE)
+            CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            graph.save_to_pickle(CACHE_PATH)
         else:
             logger.info(
                 "No cache found. Scanning '%s' for audio files...",
@@ -105,7 +116,7 @@ def _load_graph_background() -> None:
             graph = DJGraph.build(songs)
             if songs:
                 CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                graph.save_to_json(CACHE_PATH)
+                graph.save_to_pickle(CACHE_PATH)
 
         with _graph_lock:
             _graph_state["graph"] = graph

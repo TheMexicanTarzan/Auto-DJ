@@ -24,6 +24,9 @@ SONGS_DIRECTORY: str = os.environ.get(
 CACHE_PATH: Path = Path(
     os.environ.get(
         "CACHE_PATH",
-        str(_PROJECT_ROOT / "cache" / "dj_graph_cache.json"),
+        str(_PROJECT_ROOT / "cache" / "dj_graph_cache.pkl"),
     )
 )
+
+# Legacy JSON cache path — used for automatic migration to pickle.
+_LEGACY_JSON_CACHE: Path = _PROJECT_ROOT / "cache" / "dj_graph_cache.json"
