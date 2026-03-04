@@ -104,7 +104,7 @@ def _estimate_key(y: np.ndarray, sr: int) -> str:
 
 
 def _detect_beats_and_downbeats(
-    path: str | Path,
+        path: str | Path,
 ) -> tuple[float, list[float], list[float]]:
     """
     Detect BPM, the full beat grid, and downbeat ("1") locations using
@@ -137,9 +137,20 @@ def _detect_beats_and_downbeats(
     proc = RNNDownBeatProcessor()
     activations = proc(str(path))
 
-    # DBN decoder: support both 3/4 and 4/4 time signatures.
-    dbn = DBNDownBeatTrackingProcessor(beats_per_bar=[3, 4], fps=100)
-    beats = dbn(activations)
+    # DBN decoder: try both 3/4 and 4/4 separately (NumPy 2.x compatibility)
+    results = []
+    for bpb in [3, 4]:
+        dbn = DBNDownBeatTrackingProcessor(beats_per_bar=[bpb], fps=100)
+        beats_candidate = dbn(activations)
+        if len(beats_candidate) > 0:
+            # Score based on number of beats detected
+            results.append((beats_candidate, len(beats_candidate)))
+
+    if not results:
+        return 0.0, [], []
+
+    # Pick the result with more beats detected
+    beats = max(results, key=lambda x: x[1])[0]
 
     if len(beats) == 0:
         return 0.0, [], []
