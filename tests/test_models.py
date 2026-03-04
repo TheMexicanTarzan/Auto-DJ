@@ -17,7 +17,10 @@ import numpy as np
 import pytest
 
 from src.models import (
+    AudioAnalysis,
     Song,
+    analyse_audio,
+    compute_embeddings_batch,
     _detect_beats_and_downbeats,
     _estimate_key,
     _FLAT_TO_SHARP,
@@ -72,43 +75,33 @@ class TestSongDataclass:
 class TestSongFromFile:
     """Song.from_file() with mocked audio I/O and ML model."""
 
-    @patch("src.models._get_clap_model")
-    @patch("src.models._estimate_key")
-    @patch("src.models._detect_beats_and_downbeats")
-    @patch("src.models.librosa")
-    def test_from_file_happy_path(
-        self, mock_librosa, mock_beats, mock_key, mock_clap
-    ):
-        # Set up librosa mock (I/O only)
+    def test_from_file_happy_path(self):
+        import sys
+
+        mock_librosa = MagicMock()
         dummy_audio = np.random.randn(44100).astype(np.float32)
         mock_librosa.load.return_value = (dummy_audio, 44100)
         mock_librosa.resample.return_value = dummy_audio
 
-        # Set up madmom beat detection mock
-        mock_beats.return_value = (
-            125.0,
-            [0.0, 0.48, 0.96, 1.44],
-            [0.0, 0.96],
-        )
-
-        # Set up essentia key detection mock
-        mock_key.return_value = "A minor"
-
-        # Set up CLAP mock
         fake_embedding = np.random.randn(512).astype(np.float32)
+        mock_outputs = MagicMock()
+        del mock_outputs.pooler_output
+        mock_outputs.squeeze.return_value.cpu.return_value.numpy.return_value = fake_embedding
         mock_model = MagicMock()
-        mock_model.get_audio_features.return_value = MagicMock(
-            squeeze=MagicMock(return_value=MagicMock(cpu=MagicMock(return_value=MagicMock(numpy=MagicMock(return_value=fake_embedding)))))
-        )
+        mock_model.get_audio_features.return_value = mock_outputs
         mock_processor = MagicMock()
-        mock_clap.return_value = (mock_model, mock_processor)
 
-        # Create a real temporary file so Path.is_file() passes
+        mock_torch = MagicMock()
+
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp.write(b"\x00" * 100)
             tmp_path = tmp.name
 
-        song = Song.from_file(tmp_path)
+        with patch.dict(sys.modules, {"librosa": mock_librosa, "torch": mock_torch}), \
+             patch("src.models._get_clap_model", return_value=(mock_model, mock_processor)), \
+             patch("src.models._detect_beats_and_downbeats", return_value=(125.0, [0.0, 0.48, 0.96, 1.44], [0.0, 0.96])), \
+             patch("src.models._estimate_key", return_value="A minor"):
+            song = Song.from_file(tmp_path)
 
         assert song.bpm == 125.0
         assert song.key == "A minor"
@@ -121,10 +114,11 @@ class TestSongFromFile:
         with pytest.raises(FileNotFoundError):
             Song.from_file("/nonexistent/track.mp3")
 
-    @patch("src.models.librosa")
-    def test_from_file_too_short_raises(self, mock_librosa):
+    def test_from_file_too_short_raises(self):
         """Audio shorter than 1 second should raise ValueError."""
-        # 0.5 seconds at 44100 Hz
+        import sys
+
+        mock_librosa = MagicMock()
         short_audio = np.random.randn(22050).astype(np.float32)
         mock_librosa.load.return_value = (short_audio, 44100)
 
@@ -132,12 +126,15 @@ class TestSongFromFile:
             tmp.write(b"\x00" * 100)
             tmp_path = tmp.name
 
-        with pytest.raises(ValueError, match="Audio too short"):
-            Song.from_file(tmp_path)
+        with patch.dict(sys.modules, {"librosa": mock_librosa}):
+            with pytest.raises(ValueError, match="Audio too short"):
+                Song.from_file(tmp_path)
 
-    @patch("src.models.librosa")
-    def test_from_file_silent_raises(self, mock_librosa):
+    def test_from_file_silent_raises(self):
         """Effectively-silent audio should raise ValueError."""
+        import sys
+
+        mock_librosa = MagicMock()
         silent_audio = np.zeros(44100, dtype=np.float32)
         mock_librosa.load.return_value = (silent_audio, 44100)
 
@@ -145,8 +142,9 @@ class TestSongFromFile:
             tmp.write(b"\x00" * 100)
             tmp_path = tmp.name
 
-        with pytest.raises(ValueError, match="silent"):
-            Song.from_file(tmp_path)
+        with patch.dict(sys.modules, {"librosa": mock_librosa}):
+            with pytest.raises(ValueError, match="silent"):
+                Song.from_file(tmp_path)
 
 
 # =========================================================================
@@ -155,23 +153,31 @@ class TestSongFromFile:
 
 
 class TestKeyEstimation:
-    @patch.dict(
-        "sys.modules",
-        {
-            "essentia": MagicMock(),
-            "essentia.standard": MagicMock(),
-        },
-    )
     def test_returns_valid_key_string(self):
         """_estimate_key wraps Essentia and returns 'Note mode' format."""
         import sys
 
-        mock_es = sys.modules["essentia.standard"]
-        mock_extractor = MagicMock(return_value=("A", "minor", 0.82))
-        mock_es.KeyExtractor.return_value = mock_extractor
+        mock_es = MagicMock()
+        mock_extractor_instance = MagicMock(return_value=("A", "minor", 0.82))
+        mock_es.KeyExtractor = MagicMock(return_value=mock_extractor_instance)
 
-        y = np.random.randn(44100).astype(np.float32)
-        key = _estimate_key(y, sr=22050)
+        # The parent package mock must have .standard pointing to our mock_es,
+        # otherwise `import essentia.standard as es` gets a different MagicMock.
+        mock_essentia_pkg = MagicMock()
+        mock_essentia_pkg.standard = mock_es
+
+        saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith("essentia") and k in sys.modules}
+        try:
+            sys.modules["essentia"] = mock_essentia_pkg
+            sys.modules["essentia.standard"] = mock_es
+
+            y = np.random.randn(44100).astype(np.float32)
+            key = _estimate_key(y, sr=22050)
+        finally:
+            for k in list(sys.modules):
+                if k.startswith("essentia"):
+                    del sys.modules[k]
+            sys.modules.update(saved)
 
         parts = key.split()
         assert len(parts) == 2
@@ -179,23 +185,29 @@ class TestKeyEstimation:
         assert parts[1] in ("major", "minor")
         assert key == "A minor"
 
-    @patch.dict(
-        "sys.modules",
-        {
-            "essentia": MagicMock(),
-            "essentia.standard": MagicMock(),
-        },
-    )
     def test_normalises_flats_to_sharps(self):
         """Flat notation from Essentia is converted to sharp notation."""
         import sys
 
-        mock_es = sys.modules["essentia.standard"]
-        mock_extractor = MagicMock(return_value=("Bb", "minor", 0.70))
-        mock_es.KeyExtractor.return_value = mock_extractor
+        mock_es = MagicMock()
+        mock_extractor_instance = MagicMock(return_value=("Bb", "minor", 0.70))
+        mock_es.KeyExtractor = MagicMock(return_value=mock_extractor_instance)
 
-        y = np.random.randn(44100).astype(np.float32)
-        key = _estimate_key(y, sr=44100)
+        mock_essentia_pkg = MagicMock()
+        mock_essentia_pkg.standard = mock_es
+
+        saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith("essentia") and k in sys.modules}
+        try:
+            sys.modules["essentia"] = mock_essentia_pkg
+            sys.modules["essentia.standard"] = mock_es
+
+            y = np.random.randn(44100).astype(np.float32)
+            key = _estimate_key(y, sr=44100)
+        finally:
+            for k in list(sys.modules):
+                if k.startswith("essentia"):
+                    del sys.modules[k]
+            sys.modules.update(saved)
 
         assert key == "A# minor"
 
@@ -211,19 +223,19 @@ class TestBeatDetection:
         {
             "madmom": MagicMock(),
             "madmom.features": MagicMock(),
-            "madmom.features.beats": MagicMock(),
+            "madmom.features.downbeats": MagicMock(),
         },
     )
     def test_returns_bpm_and_beat_grid(self):
         """_detect_beats_and_downbeats returns BPM, beats, and downbeats."""
         import sys
 
-        mock_beats_mod = sys.modules["madmom.features.beats"]
+        mock_downbeats_mod = sys.modules["madmom.features.downbeats"]
 
         # Mock RNNDownBeatProcessor
         fake_activations = np.random.rand(100, 4)
         mock_proc = MagicMock(return_value=fake_activations)
-        mock_beats_mod.RNNDownBeatProcessor.return_value = mock_proc
+        mock_downbeats_mod.RNNDownBeatProcessor.return_value = mock_proc
 
         # Mock DBNDownBeatTrackingProcessor — simulate 120 BPM in 4/4
         fake_beats = np.array([
@@ -231,7 +243,7 @@ class TestBeatDetection:
             [2.0, 1], [2.5, 2], [3.0, 3], [3.5, 4],
         ])
         mock_dbn = MagicMock(return_value=fake_beats)
-        mock_beats_mod.DBNDownBeatTrackingProcessor.return_value = mock_dbn
+        mock_downbeats_mod.DBNDownBeatTrackingProcessor.return_value = mock_dbn
 
         bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(
             "/fake/path.mp3"
@@ -248,21 +260,21 @@ class TestBeatDetection:
         {
             "madmom": MagicMock(),
             "madmom.features": MagicMock(),
-            "madmom.features.beats": MagicMock(),
+            "madmom.features.downbeats": MagicMock(),
         },
     )
     def test_empty_beats_returns_zero(self):
         """If madmom finds no beats, return 0.0 BPM and empty lists."""
         import sys
 
-        mock_beats_mod = sys.modules["madmom.features.beats"]
+        mock_downbeats_mod = sys.modules["madmom.features.downbeats"]
 
         mock_proc = MagicMock(return_value=np.array([]))
-        mock_beats_mod.RNNDownBeatProcessor.return_value = mock_proc
+        mock_downbeats_mod.RNNDownBeatProcessor.return_value = mock_proc
 
         empty_beats = np.array([]).reshape(0, 2)
         mock_dbn = MagicMock(return_value=empty_beats)
-        mock_beats_mod.DBNDownBeatTrackingProcessor.return_value = mock_dbn
+        mock_downbeats_mod.DBNDownBeatTrackingProcessor.return_value = mock_dbn
 
         bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(
             "/fake/path.mp3"
@@ -271,6 +283,86 @@ class TestBeatDetection:
         assert bpm == 0.0
         assert beat_times == []
         assert downbeat_times == []
+
+
+# =========================================================================
+# analyse_audio tests
+# =========================================================================
+
+
+class TestAnalyseAudio:
+    """Test the top-level analyse_audio() function used by multiprocessing."""
+
+    def test_returns_audio_analysis(self):
+        import sys
+
+        mock_librosa = MagicMock()
+        dummy_audio = np.random.randn(44100).astype(np.float32)
+        mock_librosa.load.return_value = (dummy_audio, 44100)
+
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp.write(b"\x00" * 100)
+            tmp_path = tmp.name
+
+        with patch.dict(sys.modules, {"librosa": mock_librosa}), \
+             patch("src.models._detect_beats_and_downbeats", return_value=(130.0, [0.0, 0.46], [0.0])), \
+             patch("src.models._estimate_key", return_value="C major"):
+            result = analyse_audio(tmp_path)
+
+        assert result.bpm == 130.0
+        assert result.key == "C major"
+        assert result.audio is dummy_audio
+        assert result.sr == 44100
+        assert len(result.beat_times) == 2
+        assert len(result.downbeat_times) == 1
+
+    def test_missing_file_raises(self):
+        with pytest.raises(FileNotFoundError):
+            analyse_audio("/nonexistent/track.mp3")
+
+
+# =========================================================================
+# Batch CLAP embedding tests
+# =========================================================================
+
+
+class TestComputeEmbeddingsBatch:
+    """Test batched CLAP embedding computation."""
+
+    def test_batch_returns_correct_count(self):
+        import sys
+
+        mock_librosa = MagicMock()
+        mock_librosa.resample.side_effect = lambda y, **kw: y
+
+        fake_output = np.random.randn(3, 512).astype(np.float32)
+
+        mock_outputs = MagicMock()
+        mock_outputs.cpu.return_value.numpy.return_value = fake_output
+        del mock_outputs.pooler_output
+
+        mock_model = MagicMock()
+        mock_model.get_audio_features.return_value = mock_outputs
+        mock_processor = MagicMock(return_value={"input_features": MagicMock()})
+
+        mock_torch = MagicMock()
+
+        audio_list = [
+            (np.random.randn(22050).astype(np.float32), 22050)
+            for _ in range(3)
+        ]
+
+        with patch.dict(sys.modules, {"librosa": mock_librosa, "torch": mock_torch}), \
+             patch("src.models._get_clap_model", return_value=(mock_model, mock_processor)):
+            embeddings = compute_embeddings_batch(audio_list, batch_size=8)
+
+        assert len(embeddings) == 3
+        for emb in embeddings:
+            assert emb.shape == (512,)
+
+    def test_empty_input_returns_empty(self):
+        result = compute_embeddings_batch([])
+        assert result == []
 
 
 # =========================================================================
@@ -300,14 +392,24 @@ class TestScanDirectory:
         with pytest.raises(NotADirectoryError):
             scan_directory("/nonexistent/path")
 
-    @patch("src.utils.Song.from_file")
-    def test_finds_audio_files(self, mock_from_file, tmp_path):
+    @patch("src.utils.compute_embeddings_batch")
+    @patch("src.utils.analyse_audio")
+    def test_finds_audio_files(self, mock_analyse, mock_batch_embed, tmp_path):
         """Create dummy audio files and verify the scanner finds them."""
-        mock_from_file.side_effect = lambda p: Song(
-            file_path=str(p), filename=Path(p).name, bpm=120.0, key="C major"
-        )
+        def fake_analyse(p):
+            path = Path(p)
+            return AudioAnalysis(
+                file_path=str(path), filename=path.name,
+                bpm=120.0, key="C major",
+                audio=np.zeros(100, dtype=np.float32), sr=44100,
+                beat_times=[0.0, 0.5], downbeat_times=[0.0],
+            )
 
-        # Create files with supported extensions
+        mock_analyse.side_effect = fake_analyse
+        mock_batch_embed.return_value = [
+            np.zeros(512, dtype=np.float32) for _ in range(2)
+        ]
+
         (tmp_path / "track1.mp3").write_bytes(b"fake mp3 data aaa")
         (tmp_path / "track2.wav").write_bytes(b"fake wav data bbb")
         (tmp_path / "notes.txt").write_bytes(b"not audio")
@@ -319,12 +421,21 @@ class TestScanDirectory:
         assert "track1.mp3" in names
         assert "track2.wav" in names
 
-    @patch("src.utils.Song.from_file")
-    def test_deduplicates_identical_files(self, mock_from_file, tmp_path):
+    @patch("src.utils.compute_embeddings_batch")
+    @patch("src.utils.analyse_audio")
+    def test_deduplicates_identical_files(self, mock_analyse, mock_batch_embed, tmp_path):
         """Byte-identical files should be deduplicated."""
-        mock_from_file.side_effect = lambda p: Song(
-            file_path=str(p), filename=Path(p).name
-        )
+        def fake_analyse(p):
+            path = Path(p)
+            return AudioAnalysis(
+                file_path=str(path), filename=path.name,
+                bpm=120.0, key="C major",
+                audio=np.zeros(100, dtype=np.float32), sr=44100,
+                beat_times=[], downbeat_times=[],
+            )
+
+        mock_analyse.side_effect = fake_analyse
+        mock_batch_embed.return_value = [np.zeros(512, dtype=np.float32)]
 
         content = b"same bytes"
         (tmp_path / "original.mp3").write_bytes(content)
@@ -333,12 +444,21 @@ class TestScanDirectory:
         songs = scan_directory(tmp_path)
         assert len(songs) == 1
 
-    @patch("src.utils.Song.from_file")
-    def test_recursive_scan(self, mock_from_file, tmp_path):
+    @patch("src.utils.compute_embeddings_batch")
+    @patch("src.utils.analyse_audio")
+    def test_recursive_scan(self, mock_analyse, mock_batch_embed, tmp_path):
         """Files in nested subdirectories should be found."""
-        mock_from_file.side_effect = lambda p: Song(
-            file_path=str(p), filename=Path(p).name
-        )
+        def fake_analyse(p):
+            path = Path(p)
+            return AudioAnalysis(
+                file_path=str(path), filename=path.name,
+                bpm=120.0, key="C major",
+                audio=np.zeros(100, dtype=np.float32), sr=44100,
+                beat_times=[], downbeat_times=[],
+            )
+
+        mock_analyse.side_effect = fake_analyse
+        mock_batch_embed.return_value = [np.zeros(512, dtype=np.float32)]
 
         sub = tmp_path / "genre" / "artist"
         sub.mkdir(parents=True)
@@ -348,10 +468,10 @@ class TestScanDirectory:
         assert len(songs) == 1
         assert songs[0].filename == "deep_track.flac"
 
-    @patch("src.utils.Song.from_file")
-    def test_skips_failed_analysis(self, mock_from_file, tmp_path):
-        """If Song.from_file raises, the scanner should skip that file."""
-        mock_from_file.side_effect = RuntimeError("analysis failed")
+    @patch("src.utils.analyse_audio")
+    def test_skips_failed_analysis(self, mock_analyse, tmp_path):
+        """If analyse_audio raises, the scanner should skip that file."""
+        mock_analyse.side_effect = RuntimeError("analysis failed")
         (tmp_path / "bad.mp3").write_bytes(b"corrupt")
 
         songs = scan_directory(tmp_path)

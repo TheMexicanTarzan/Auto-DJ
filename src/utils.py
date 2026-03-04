@@ -175,6 +175,8 @@ def scan_directory(
             bpm=analysis.bpm,
             key=analysis.key,
             embedding=embedding,
+            beat_times=analysis.beat_times,
+            downbeat_times=analysis.downbeat_times,
         ))
 
     logger.info(

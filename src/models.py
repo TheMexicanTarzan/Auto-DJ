@@ -11,10 +11,27 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+class AudioAnalysis(NamedTuple):
+    """Intermediate result from audio analysis (before CLAP embedding).
+
+    Produced by ``analyse_audio()`` in multiprocessing workers; the CLAP
+    embedding step runs separately in the main process via batch inference.
+    """
+    file_path: str
+    filename: str
+    bpm: float
+    key: str
+    audio: np.ndarray   # mono waveform at native sample rate
+    sr: int
+    beat_times: list     # all detected beat times (seconds)
+    downbeat_times: list # downbeat ("1") times (seconds)
 
 # ---------------------------------------------------------------------------
 # CLAP model singleton — loaded once, shared across all Song instances.
@@ -136,6 +153,113 @@ def _detect_beats_and_downbeats(
         bpm = 0.0
 
     return bpm, beat_times, downbeat_times
+
+
+def analyse_audio(path: str | Path) -> AudioAnalysis:
+    """
+    Load an audio file and compute BPM, key, beats, and downbeats
+    (everything *except* the CLAP embedding).
+
+    This is a top-level function so it can be pickled for use with
+    ``multiprocessing.Pool``.  The CLAP embedding step is deliberately
+    excluded — it runs in the main process via batch inference to avoid
+    duplicating the ~600 MB model across worker processes.
+    """
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Audio file not found: {path}")
+
+    logger.info("Analysing '%s'...", path.name)
+
+    import librosa  # kept for audio I/O only
+
+    y, sr = librosa.load(str(path), sr=None, mono=True)
+
+    # Validate audio
+    duration = len(y) / sr
+    if duration < 1.0:
+        raise ValueError(
+            f"Audio too short ({duration:.2f}s): {path.name}. "
+            "At least 1 second of audio is required."
+        )
+
+    rms = float(np.sqrt(np.mean(y**2)))
+    if rms < 1e-4:
+        raise ValueError(
+            f"Audio appears to be silent (RMS={rms:.6f}): {path.name}"
+        )
+
+    # Beat / tempo detection (madmom)
+    bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(path)
+
+    # Key estimation (Essentia)
+    key = _estimate_key(y, sr)
+
+    return AudioAnalysis(
+        file_path=str(path),
+        filename=path.name,
+        bpm=round(bpm, 2),
+        key=key,
+        audio=y,
+        sr=sr,
+        beat_times=beat_times,
+        downbeat_times=downbeat_times,
+    )
+
+
+def compute_embeddings_batch(
+    audio_list: list[tuple[np.ndarray, int]],
+    batch_size: int = 8,
+) -> list[np.ndarray]:
+    """
+    Compute CLAP embeddings for multiple audio signals in batched
+    forward passes.
+
+    Args:
+        audio_list: List of (waveform, sample_rate) tuples.
+        batch_size: Number of audio signals per forward pass.
+
+    Returns:
+        List of 1-D numpy arrays (one 512-dim embedding per input).
+    """
+    if not audio_list:
+        return []
+
+    import librosa
+    import torch
+
+    model, processor = _get_clap_model()
+    target_sr = 48_000
+
+    # Resample all audio to 48 kHz (CLAP's expected rate)
+    resampled = []
+    for y, sr in audio_list:
+        if sr != target_sr:
+            y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+        resampled.append(y)
+
+    embeddings: list[np.ndarray] = []
+
+    for i in range(0, len(resampled), batch_size):
+        batch = resampled[i : i + batch_size]
+        inputs = processor(
+            audios=batch,
+            sampling_rate=target_sr,
+            return_tensors="pt",
+            padding=True,
+        )
+        with torch.no_grad():
+            outputs = model.get_audio_features(**inputs)
+
+        if hasattr(outputs, "pooler_output"):
+            outputs = outputs.pooler_output
+
+        # outputs shape: (batch, 512) — split into individual vectors
+        batch_embs = outputs.cpu().numpy()
+        for j in range(batch_embs.shape[0]):
+            embeddings.append(batch_embs[j])
+
+    return embeddings
 
 
 # ---------------------------------------------------------------------------
