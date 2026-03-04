@@ -121,6 +121,13 @@ def _detect_beats_and_downbeats(
         downbeat_times: List of downbeat times (beat position == 1) in
                         seconds — critical for DJ phrasing.
     """
+    # madmom's Cython code references np.int / np.float / np.complex, which
+    # were removed in NumPy 1.24.  Restore them so madmom works with modern
+    # NumPy without requiring a source patch.
+    for _alias, _builtin in [("int", int), ("float", float), ("complex", complex)]:
+        if not hasattr(np, _alias):
+            setattr(np, _alias, _builtin)
+
     from madmom.features.downbeats import (
         DBNDownBeatTrackingProcessor,
         RNNDownBeatProcessor,
