@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
-from multiprocessing import Pool
 from pathlib import Path
 
 from src.models import Song, analyse_audio, compute_embeddings_batch
@@ -29,6 +27,10 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".aiff",
 }
 
+# Number of songs to analyse before computing embeddings and freeing
+# the raw audio.  Keeps peak memory bounded (~5 waveforms + CLAP model).
+_CHUNK_SIZE = 5
+
 
 def _file_hash(path: Path, chunk_size: int = 65_536) -> str:
     """
@@ -45,20 +47,6 @@ def _file_hash(path: Path, chunk_size: int = 65_536) -> str:
     return sha.hexdigest()
 
 
-def _analyse_one(path_str: str) -> tuple | None:
-    """
-    Wrapper for multiprocessing: analyse a single audio file.
-
-    Returns an AudioAnalysis on success, None on failure.
-    Must be a top-level function for pickling.
-    """
-    try:
-        return analyse_audio(path_str)
-    except Exception:
-        logger.exception("Failed to analyse '%s', skipping.", path_str)
-        return None
-
-
 def scan_directory(
     directory: str | Path,
     progress_callback: callable | None = None,
@@ -72,15 +60,17 @@ def scan_directory(
         same hash they are byte-identical, so we keep only the first one we
         encounter and log a warning for the duplicate.
 
-    Parallelism:
-        Audio analysis is split into two phases:
-        - Phase 2a: BPM + key detection run in a multiprocessing pool
-          (CPU-bound librosa work benefits from true parallelism).
-          Workers are capped at 3 to limit memory (each child loads
-          audio into memory independently).
-        - Phase 2b: CLAP embeddings are computed in the main process
-          using batched forward passes (avoids duplicating the ~600 MB
-          model across worker processes).
+    Memory-bounded chunked processing:
+        Songs are processed in small chunks (default 5) to keep memory
+        usage bounded on constrained systems (e.g. 4 GB WSL instances):
+
+        For each chunk:
+          1. Analyse audio sequentially (BPM, key, beats via madmom/essentia).
+          2. Compute CLAP embeddings for the chunk in a batched forward pass.
+          3. Build Song objects and discard raw waveform data.
+
+        This ensures at most ~5 waveforms are held in memory at once,
+        rather than the entire library.
 
     Args:
         directory: Root folder to scan.
@@ -124,60 +114,44 @@ def scan_directory(
         seen_hashes[file_hash] = path
         unique_paths.append(path)
 
-    # --- Phase 2a: parallel BPM + key analysis (multiprocessing) ---
-    # Cap at 3 workers — each child loads full audio into memory and
-    # librosa / numpy are CPU-bound, so true parallelism helps.
-    max_workers = min(3, len(unique_paths), os.cpu_count() or 1)
-    analyses = []
-
-    path_strs = [str(p) for p in unique_paths]
-
-    if max_workers <= 1 or len(unique_paths) <= 1:
-        # Fall back to sequential for trivial cases (avoids pool overhead)
-        for idx, path_str in enumerate(path_strs, 1):
-            result = _analyse_one(path_str)
-            if result is not None:
-                analyses.append(result)
-            if progress_callback:
-                progress_callback(idx + skipped, total, Path(path_str).name)
-    else:
-        completed = 0
-        with Pool(processes=max_workers) as pool:
-            for result in pool.imap_unordered(_analyse_one, path_strs):
-                completed += 1
-                if result is not None:
-                    analyses.append(result)
-                fname = result.filename if result is not None else "unknown"
-                if progress_callback:
-                    progress_callback(completed + skipped, total, fname)
-
-    if not analyses:
-        logger.info(
-            "Scan complete: 0 song(s) loaded, %d duplicate(s) skipped.",
-            skipped,
-        )
-        return []
-
-    # --- Phase 2b: batch CLAP embeddings (main process) ---
-    logger.info(
-        "Computing CLAP embeddings for %d track(s) in batches...",
-        len(analyses),
-    )
-    audio_list = [(a.audio, a.sr) for a in analyses]
-    embeddings = compute_embeddings_batch(audio_list, batch_size=8)
-
-    # --- Build Song objects ---
+    # --- Phase 2: chunked analyse → embed → build Song loop ---
     songs: list[Song] = []
-    for analysis, embedding in zip(analyses, embeddings):
-        songs.append(Song(
-            file_path=analysis.file_path,
-            filename=analysis.filename,
-            bpm=analysis.bpm,
-            key=analysis.key,
-            embedding=embedding,
-            beat_times=analysis.beat_times,
-            downbeat_times=analysis.downbeat_times,
-        ))
+    processed = 0
+
+    for chunk_start in range(0, len(unique_paths), _CHUNK_SIZE):
+        chunk_paths = unique_paths[chunk_start : chunk_start + _CHUNK_SIZE]
+
+        # 2a. Sequential audio analysis (BPM, key, beats)
+        chunk_analyses = []
+        for path in chunk_paths:
+            processed += 1
+            try:
+                analysis = analyse_audio(str(path))
+                chunk_analyses.append(analysis)
+            except Exception:
+                logger.exception("Failed to analyse '%s', skipping.", path)
+            if progress_callback:
+                progress_callback(processed + skipped, total, path.name)
+
+        if not chunk_analyses:
+            continue
+
+        # 2b. Batch CLAP embeddings for this chunk (main process)
+        audio_list = [(a.audio, a.sr) for a in chunk_analyses]
+        embeddings = compute_embeddings_batch(audio_list, batch_size=_CHUNK_SIZE)
+
+        # 2c. Build Song objects — raw audio is released when
+        #     chunk_analyses goes out of scope at next iteration.
+        for analysis, embedding in zip(chunk_analyses, embeddings):
+            songs.append(Song(
+                file_path=analysis.file_path,
+                filename=analysis.filename,
+                bpm=analysis.bpm,
+                key=analysis.key,
+                embedding=embedding,
+                beat_times=analysis.beat_times,
+                downbeat_times=analysis.downbeat_times,
+            ))
 
     logger.info(
         "Scan complete: %d song(s) loaded, %d duplicate(s) skipped.",
