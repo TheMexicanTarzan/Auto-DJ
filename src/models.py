@@ -55,8 +55,8 @@ def _get_clap_model():
 
         local_path = str(Path(__file__).resolve().parent / "clap")
         logger.info("Loading CLAP model from '%s' (this only happens once)...", local_path)
-        _clap_processor = ClapProcessor.from_pretrained(local_path)
-        _clap_model = ClapModel.from_pretrained(local_path)
+        _clap_processor = ClapProcessor.from_pretrained(local_path, local_files_only=True)
+        _clap_model = ClapModel.from_pretrained(local_path, local_files_only=True)
         _clap_model.eval()  # inference mode — no gradient tracking needed
 
     return _clap_model, _clap_processor
