@@ -53,10 +53,10 @@ def _get_clap_model():
     if _clap_model is None:
         from transformers import ClapModel, ClapProcessor
 
-        model_name = "laion/clap-htsat-unfused"
-        logger.info("Loading CLAP model '%s' (this only happens once)...", model_name)
-        _clap_processor = ClapProcessor.from_pretrained(model_name)
-        _clap_model = ClapModel.from_pretrained(model_name)
+        local_path = str(Path(__file__).resolve().parent / "clap")
+        logger.info("Loading CLAP model from '%s' (this only happens once)...", local_path)
+        _clap_processor = ClapProcessor.from_pretrained(local_path)
+        _clap_model = ClapModel.from_pretrained(local_path)
         _clap_model.eval()  # inference mode — no gradient tracking needed
 
     return _clap_model, _clap_processor
