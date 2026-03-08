@@ -353,7 +353,7 @@ def calculate_weight(
 # 5. Vectorised batch edge computation
 # =========================================================================
 #
-# For graph construction we need weights for all O(n²) directed pairs.
+# For graph construction we need weights for all O(n²/2) unordered pairs.
 # Computing them one-at-a-time with calculate_weight() is dominated by
 # Python loop overhead and redundant numpy calls.  The functions below
 # do everything in bulk using numpy broadcasting / GEMM, giving ~50-100×
@@ -415,16 +415,23 @@ def batch_calculate_weights(
     weights: dict[str, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Compute the full NxN weight matrix for all directed song pairs using
-    vectorised numpy operations.  This is the batch replacement for calling
-    ``calculate_weight()`` inside a nested loop.
+    Compute the full NxN weight matrix and return only the upper-triangle
+    entries (unordered pairs) using vectorised numpy operations.  This is
+    the batch replacement for calling ``calculate_weight()`` inside a
+    nested loop.
+
+    Because all three cost components (harmonic distance, tempo penalty,
+    semantic distance) are symmetric, weight(A, B) == weight(B, A).  We
+    exploit this by zeroing the lower triangle + diagonal in the finite
+    mask so that callers only see each unordered pair once.
 
     Returns:
         A tuple of (weight_matrix, finite_mask) where:
           - weight_matrix: (N, N) float array of composite transition costs.
             Unmixable pairs contain np.inf.
-          - finite_mask: (N, N) boolean array — True where the weight is
-            finite (i.e. the pair has a valid edge).
+          - finite_mask: (N, N) boolean array — True only in the upper
+            triangle where the weight is finite (i.e. the pair has a
+            valid edge).
     """
     w = weights or DEFAULT_WEIGHTS
     n = len(songs)
@@ -441,8 +448,9 @@ def batch_calculate_weights(
     tempo_mat = batch_tempo_penalty_matrix(bpms)
     finite_mask = np.isfinite(tempo_mat)
 
-    # Exclude self-loops
-    np.fill_diagonal(finite_mask, False)
+    # Exclude self-loops AND lower triangle (symmetric costs → keep
+    # only the upper triangle so each unordered pair appears once).
+    finite_mask[np.tril_indices(n)] = False
 
     # --- Harmonic ---
     harmonic_mat = batch_harmonic_distance_matrix(keys)

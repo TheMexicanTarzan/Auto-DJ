@@ -61,14 +61,14 @@ class TestGraphBuild:
         assert g.num_nodes == 1
         assert g.num_edges == 0
 
-    def test_two_compatible_songs_get_bidirectional_edges(self):
+    def test_two_compatible_songs_get_single_edge(self):
         a = _song("a.mp3", bpm=120, key="C major", embedding=_SHARED_EMB)
         b = _song("b.mp3", bpm=122, key="G major", embedding=_SHARED_EMB)
         g = DJGraph.build([a, b])
 
         assert g.num_nodes == 2
-        # Both A→B and B→A should exist (directed graph)
-        assert g.num_edges == 2
+        # Single undirected edge {A, B} (symmetric cost)
+        assert g.num_edges == 1
 
     def test_unmixable_tempo_produces_no_edge(self):
         # 100 vs 130 BPM = 30% diff — way over the 8% threshold

@@ -3,27 +3,27 @@ graph.py — Mixing graph and pathfinding for the DJ Mixing Pathfinding System.
 
 This is the final piece of the pipeline.  It takes the fully-analysed Song
 objects and the transition-cost function from metrics.py, wires them into a
-weighted directed graph via igraph, and exposes Dijkstra-based pathfinding
+weighted undirected graph via igraph, and exposes Dijkstra-based pathfinding
 so we can answer: "What is the smoothest sequence of transitions from
 Song A to Song B?"
 
 Architecture
 ------------
-    Songs  ──►  DJGraph.build()  ──►  igraph DiGraph
+    Songs  ──►  DJGraph.build()  ──►  igraph Graph (undirected)
                                           │
                    query ──►  get_shortest_path(src, dst)
                                           │
                                      list[Song]  (ordered mix path)
 
 Each *node* in the graph is a Song, keyed by its file_path (the only
-guaranteed-unique identifier).  Each *directed edge* A→B carries the
-transition weight returned by calculate_weight(A, B).
+guaranteed-unique identifier).  Each *undirected edge* {A, B} carries the
+transition weight computed from the three symmetric cost components
+(harmonic distance, tempo penalty, semantic distance).
 
-We use a directed graph because, although the current cost function is
-symmetric, real-world DJ transitions are not always reversible at equal
-quality (e.g. energy ramp-ups vs. ramp-downs).  Building directed edges
-from the start means the graph is ready for asymmetric cost functions
-without structural changes.
+Because all three metrics live in a metric space (distance(A, B) ==
+distance(B, A)), a single undirected edge per pair fully captures the
+transition cost.  This halves edge count, memory, and Dijkstra traversal
+work compared to a directed representation.
 
 Edges with infinite weight (unmixable tempo gap) are simply not created,
 which is equivalent to "no road exists between these two nodes" in a
@@ -54,17 +54,20 @@ class NoPathError(Exception):
 
 class DJGraph:
     """
-    A weighted directed graph where nodes are songs and edge weights
+    A weighted undirected graph where nodes are songs and edge weights
     represent transition cost (lower = smoother mix).
 
+    All cost components are symmetric, so a single undirected edge per
+    pair is sufficient and halves storage and traversal work.
+
     Attributes:
-        graph:    The underlying igraph Graph (directed).
+        graph:    The underlying igraph Graph (undirected).
         _songs:   Lookup dict mapping file_path → Song for quick access.
         _layout:  Cached 2D layout coordinates {file_path: (x, y)}.
     """
 
     def __init__(self) -> None:
-        self.graph: igraph.Graph = igraph.Graph(directed=True)
+        self.graph: igraph.Graph = igraph.Graph(directed=False)
         self._songs: dict[str, Song] = {}
         self._filename_index: dict[str, Song] = {}  # filename → Song (O(1) lookup)
         self._layout: dict[str, tuple[float, float]] = {}
@@ -84,11 +87,11 @@ class DJGraph:
         """
         Factory that creates a fully-wired DJGraph from a list of songs.
 
-        For every ordered pair (A, B) where A ≠ B, we compute the
+        For every unordered pair {A, B} where A ≠ B, we compute the
         transition cost.  If the cost is finite (i.e. the pair is
-        mixable), we add a directed edge A→B with that cost as the
-        weight.  Infinite-cost pairs are skipped — they simply have
-        no connecting edge.
+        mixable), we add an undirected edge {A, B} with that cost as
+        the weight.  Infinite-cost pairs are skipped — they simply
+        have no connecting edge.
 
         Complexity: O(n²) edge evaluations for n songs.  This is
         inherent to building a dense graph; for very large libraries
@@ -130,7 +133,7 @@ class DJGraph:
 
     def _add_edges(self, *, weights: dict[str, float] | None = None) -> None:
         """
-        Evaluate every ordered song pair and add finite-cost edges.
+        Evaluate every unordered song pair and add finite-cost edges.
 
         Uses vectorised numpy operations (batch_calculate_weights) to
         compute the full N×N weight matrix in bulk, replacing the O(n²)
@@ -152,7 +155,7 @@ class DJGraph:
         src_indices, dst_indices = np.where(finite_mask)
 
         edge_count = len(src_indices)
-        skipped = n * (n - 1) - edge_count
+        skipped = n * (n - 1) // 2 - edge_count
 
         if edge_count > 0:
             # Build edge list using igraph vertex indices (which match
@@ -293,7 +296,7 @@ class DJGraph:
             instance.graph.vs["bpm"] = [s.bpm for s in song_list]
             instance.graph.vs["key"] = [s.key for s in song_list]
 
-        # Rebuild directed edges.
+        # Rebuild edges.
         if raw["edges"]:
             edge_list = [(e["source"], e["target"]) for e in raw["edges"]]
             weight_list = [e["weight"] for e in raw["edges"]]
@@ -530,7 +533,7 @@ class DJGraph:
         src_v = self.graph.vs.find(name=src.file_path)
         dst_v = self.graph.vs.find(name=dst.file_path)
         eid = self.graph.get_eid(
-            src_v.index, dst_v.index, directed=True, error=False,
+            src_v.index, dst_v.index, error=False,
         )
         if eid < 0:
             return float("inf")
@@ -544,8 +547,10 @@ class DJGraph:
         song = self.get_song(song_id)
         v = self.graph.vs.find(name=song.file_path)
         result = []
-        for eid in self.graph.incident(v, mode="out"):
+        for eid in self.graph.incident(v, mode="all"):
             edge = self.graph.es[eid]
-            target_v = self.graph.vs[edge.target]
-            result.append((self._songs[target_v["name"]], edge["weight"]))
+            # In an undirected graph, pick the *other* endpoint
+            other_idx = edge.target if edge.source == v.index else edge.source
+            other_v = self.graph.vs[other_idx]
+            result.append((self._songs[other_v["name"]], edge["weight"]))
         return sorted(result, key=lambda x: x[1])

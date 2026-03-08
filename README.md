@@ -1,6 +1,6 @@
 # Auto-DJ — DJ Mixing Pathfinding System
 
-A Python system that analyses a library of audio files and models them as nodes in a weighted directed graph, enabling intelligent mix-path discovery between tracks based on BPM, musical key, and sonic similarity.
+A Python system that analyses a library of audio files and models them as nodes in a weighted undirected graph, enabling intelligent mix-path discovery between tracks based on BPM, musical key, and sonic similarity.
 
 ## Project Structure
 
@@ -64,6 +64,6 @@ print(f"Total cost: {cost:.4f}")
 3. **Key Detection** — Musical key and scale are estimated with `essentia`'s KeyExtractor algorithm.
 4. **Embedding** — Each track is passed through the `laion/clap-htsat-unfused` CLAP model to produce a 512-dimensional vector representing its sonic character.
 5. **Deduplication** — The directory scanner hashes file contents (SHA-256) to skip byte-identical duplicates.
-6. **Transition Cost** — Each ordered pair of songs is scored by combining harmonic distance (Circle of Fifths), tempo penalty (8% threshold), and cosine distance between embeddings.
-7. **Graph Construction** — Songs become nodes in a NetworkX DiGraph; finite-cost pairs become weighted directed edges.
+6. **Transition Cost** — Each unordered pair of songs is scored by combining harmonic distance (Circle of Fifths), tempo penalty (8% threshold), and cosine distance between embeddings.
+7. **Graph Construction** — Songs become nodes in an igraph undirected graph; finite-cost pairs become weighted undirected edges.
 8. **Pathfinding** — Dijkstra's algorithm finds the lowest-cost sequence of transitions from any source track to any target track.

@@ -10,7 +10,7 @@ Example:
 This script:
     1. Scans the given directory for audio files.
     2. Analyses each track (BPM, key, CLAP embedding).
-    3. Builds a weighted directed graph of possible transitions.
+    3. Builds a weighted undirected graph of possible transitions.
     4. Finds the smoothest mix path from source to target via Dijkstra.
     5. Prints the path with per-hop transition details.
 """
