@@ -77,10 +77,7 @@ class TestSongFromFile:
     def test_from_file_happy_path(self):
         import sys
 
-        mock_librosa = MagicMock()
         dummy_audio = np.random.randn(44100).astype(np.float32)
-        mock_librosa.load.return_value = (dummy_audio, 44100)
-        mock_librosa.resample.return_value = dummy_audio
 
         fake_embedding = np.random.randn(512).astype(np.float32)
         mock_outputs = MagicMock()
@@ -96,7 +93,9 @@ class TestSongFromFile:
             tmp.write(b"\x00" * 100)
             tmp_path = tmp.name
 
-        with patch.dict(sys.modules, {"librosa": mock_librosa, "torch": mock_torch}), \
+        with patch.dict(sys.modules, {"torch": mock_torch}), \
+             patch("src.models._load_audio", return_value=(dummy_audio, 44100)), \
+             patch("src.models._resample", side_effect=lambda y, **kw: y), \
              patch("src.models._get_clap_model", return_value=(mock_model, mock_processor)), \
              patch("src.models._detect_beats_and_downbeats", return_value=(125.0, [0.0, 0.48, 0.96, 1.44], [0.0, 0.96])), \
              patch("src.models._estimate_key", return_value="A minor"):
@@ -115,33 +114,25 @@ class TestSongFromFile:
 
     def test_from_file_too_short_raises(self):
         """Audio shorter than 1 second should raise ValueError."""
-        import sys
-
-        mock_librosa = MagicMock()
         short_audio = np.random.randn(22050).astype(np.float32)
-        mock_librosa.load.return_value = (short_audio, 44100)
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp.write(b"\x00" * 100)
             tmp_path = tmp.name
 
-        with patch.dict(sys.modules, {"librosa": mock_librosa}):
+        with patch("src.models._load_audio", return_value=(short_audio, 44100)):
             with pytest.raises(ValueError, match="Audio too short"):
                 Song.from_file(tmp_path)
 
     def test_from_file_silent_raises(self):
         """Effectively-silent audio should raise ValueError."""
-        import sys
-
-        mock_librosa = MagicMock()
         silent_audio = np.zeros(44100, dtype=np.float32)
-        mock_librosa.load.return_value = (silent_audio, 44100)
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp.write(b"\x00" * 100)
             tmp_path = tmp.name
 
-        with patch.dict(sys.modules, {"librosa": mock_librosa}):
+        with patch("src.models._load_audio", return_value=(silent_audio, 44100)):
             with pytest.raises(ValueError, match="silent"):
                 Song.from_file(tmp_path)
 
@@ -287,17 +278,13 @@ class TestAnalyseAudio:
     """Test the top-level analyse_audio() function used by multiprocessing."""
 
     def test_returns_audio_analysis(self):
-        import sys
-
-        mock_librosa = MagicMock()
         dummy_audio = np.random.randn(44100).astype(np.float32)
-        mock_librosa.load.return_value = (dummy_audio, 44100)
 
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             tmp.write(b"\x00" * 100)
             tmp_path = tmp.name
 
-        with patch.dict(sys.modules, {"librosa": mock_librosa}), \
+        with patch("src.models._load_audio", return_value=(dummy_audio, 44100)), \
              patch("src.models._detect_beats_and_downbeats", return_value=(130.0, [0.0, 0.46], [0.0])), \
              patch("src.models._estimate_key", return_value="C major"):
             result = analyse_audio(tmp_path)
@@ -325,9 +312,6 @@ class TestComputeEmbeddingsBatch:
     def test_batch_returns_correct_count(self):
         import sys
 
-        mock_librosa = MagicMock()
-        mock_librosa.resample.side_effect = lambda y, **kw: y
-
         fake_output = np.random.randn(3, 512).astype(np.float32)
 
         mock_outputs = MagicMock()
@@ -345,7 +329,8 @@ class TestComputeEmbeddingsBatch:
             for _ in range(3)
         ]
 
-        with patch.dict(sys.modules, {"librosa": mock_librosa, "torch": mock_torch}), \
+        with patch.dict(sys.modules, {"torch": mock_torch}), \
+             patch("src.models._resample", side_effect=lambda y, **kw: y), \
              patch("src.models._get_clap_model", return_value=(mock_model, mock_processor)):
             embeddings = compute_embeddings_batch(audio_list, batch_size=8)
 

@@ -37,9 +37,9 @@ class AudioAnalysis(NamedTuple):
 # CLAP model singleton — loaded once, shared across all Song instances.
 # We use laion/clap-htsat-unfused for general-purpose audio embeddings.
 #
-# Heavy libraries (librosa, essentia, torch, transformers) are imported
-# lazily inside the functions that need them so that cached-graph startups
-# stay fast.
+# Heavy libraries (essentia, torch, transformers) are imported lazily
+# inside the functions that need them so that cached-graph startups stay
+# fast.
 # ---------------------------------------------------------------------------
 
 _clap_model = None
@@ -60,6 +60,46 @@ def _get_clap_model():
         _clap_model.eval()  # inference mode — no gradient tracking needed
 
     return _clap_model, _clap_processor
+
+
+# ---------------------------------------------------------------------------
+# Audio loading helper  (Essentia MonoLoader — backed by ffmpeg)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SR = 44100  # Standard sample rate used for analysis
+
+
+def _load_audio(path: str | Path, sr: int = _DEFAULT_SR) -> tuple[np.ndarray, int]:
+    """
+    Load an audio file as a mono waveform using Essentia's ``MonoLoader``.
+
+    Uses ffmpeg under the hood (via Essentia's C++ bindings), which is
+    significantly faster than librosa's Python fallback chain and natively
+    handles m4a/aac without PySoundFile warnings.
+
+    Args:
+        path: Path to the audio file.
+        sr:   Target sample rate (default 44100 Hz).
+
+    Returns:
+        (y, sr) — mono waveform as float32 numpy array, and the sample rate.
+    """
+    import essentia.standard as es
+
+    loader = es.MonoLoader(filename=str(path), sampleRate=float(sr))
+    y = loader()
+    return y, sr
+
+
+def _resample(y: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """Resample audio using Essentia's ``Resample`` algorithm."""
+    if orig_sr == target_sr:
+        return y
+    import essentia.standard as es
+
+    resampler = es.Resample(inputSampleRate=float(orig_sr),
+                            outputSampleRate=float(target_sr))
+    return resampler(y.astype(np.float32))
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +167,7 @@ def _detect_beats_and_downbeats(
 
     # RhythmExtractor2013 requires 44100 Hz input; resample if needed.
     if sr != _RHYTHM_SR:
-        import librosa
-        y = librosa.resample(y, orig_sr=sr, target_sr=_RHYTHM_SR)
+        y = _resample(y, orig_sr=sr, target_sr=_RHYTHM_SR)
 
     audio = y.astype(np.float32)
 
@@ -156,9 +195,7 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
 
     logger.info("Analysing '%s'...", path.name)
 
-    import librosa  # kept for audio I/O only
-
-    y, sr = librosa.load(str(path), sr=None, mono=True)
+    y, sr = _load_audio(path)
 
     # Validate audio
     duration = len(y) / sr
@@ -210,7 +247,6 @@ def compute_embeddings_batch(
     if not audio_list:
         return []
 
-    import librosa
     import torch
 
     model, processor = _get_clap_model()
@@ -220,7 +256,7 @@ def compute_embeddings_batch(
     resampled = []
     for y, sr in audio_list:
         if sr != target_sr:
-            y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+            y = _resample(y, orig_sr=sr, target_sr=target_sr)
         resampled.append(y)
 
     embeddings: list[np.ndarray] = []
@@ -287,7 +323,7 @@ class Song:
         Analyse an audio file and return a fully-populated Song instance.
 
         Steps:
-            1. Load the audio with librosa (mono, native sample rate).
+            1. Load the audio with Essentia MonoLoader (mono, 44100 Hz).
             2. Validate the audio (reject files that are too short or silent).
             3. Estimate BPM and beat grid via Essentia's RhythmExtractor2013.
             4. Estimate the musical key via Essentia's KeyExtractor.
@@ -299,10 +335,8 @@ class Song:
 
         logger.info("Analysing '%s'...", path.name)
 
-        import librosa  # kept for audio I/O only
-
         # --- 1. Load audio ------------------------------------------------
-        y, sr = librosa.load(str(path), sr=None, mono=True)
+        y, sr = _load_audio(path)
 
         # --- 2. Validate audio --------------------------------------------
         duration = len(y) / sr
@@ -350,7 +384,6 @@ class Song:
         The CLAP model expects audio at 48 kHz, so we resample if needed.
         Returns a 1-D numpy array (typically 512 dimensions).
         """
-        import librosa  # kept for resampling (I/O utility)
         import torch
 
         model, processor = _get_clap_model()
@@ -358,7 +391,7 @@ class Song:
         # CLAP expects 48 kHz input
         target_sr = 48_000
         if sr != target_sr:
-            y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+            y = _resample(y, orig_sr=sr, target_sr=target_sr)
 
         # Prepare inputs and run inference (no gradients needed)
         inputs = processor(audio=y, sampling_rate=target_sr, return_tensors="pt")

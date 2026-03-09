@@ -1,14 +1,10 @@
-# Audio I/O  (librosa is retained *only* for file loading and resampling)
+# Audio I/O, beat tracking & key detection
+# essentia provides MonoLoader (ffmpeg-backed audio I/O),
+# RhythmExtractor2013 for BPM/beat detection, and KeyExtractor for
+# global key estimation.
 # System dependency: ffmpeg (required for m4a/aac decoding)
 #   sudo apt-get install ffmpeg   # Debian/Ubuntu
 #   brew install ffmpeg            # macOS
-librosa>=0.10.0
-soundfile>=0.12.0
-pydub>=0.25.0
-
-# Beat tracking & key detection
-# essentia provides RhythmExtractor2013 for BPM/beat detection and
-# KeyExtractor for global key estimation.
 # NOTE: If pip install fails, try:  conda install -c mtgdb essentia
 # or use the pre-built wheels:  pip install essentia==2.1b6.dev1184
 essentia>=2.1b6
