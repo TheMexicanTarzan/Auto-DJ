@@ -25,7 +25,7 @@ from pathlib import Path
 from src.config import CACHE_PATH, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
 from src.metrics import calculate_weight
-from src.utils import scan_directory
+from src.utils import analyse_new_songs, discover_changes, scan_directory
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,6 +104,36 @@ def main(argv: list[str] | None = None) -> int:
         # --- Save to cache for future runs --------------------------------
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         dj_graph.save_to_pickle(CACHE_PATH)
+
+    # --- Incremental sync: detect new/removed songs -----------------------
+    if CACHE_PATH.exists():
+        logger.info("Checking for library changes in '%s'...", args.directory)
+        try:
+            new_paths, removed_hashes = discover_changes(
+                args.directory, dj_graph.known_hashes,
+            )
+        except (NotADirectoryError, OSError) as exc:
+            logger.warning("Cannot scan directory for changes: %s", exc)
+            new_paths, removed_hashes = [], set()
+
+        changed = False
+
+        if removed_hashes:
+            logger.info("Removing %d deleted song(s)...", len(removed_hashes))
+            dj_graph.remove_songs(removed_hashes)
+            changed = True
+
+        if new_paths:
+            logger.info("Analysing %d new song(s)...", len(new_paths))
+            new_songs = analyse_new_songs(new_paths)
+            if new_songs:
+                dj_graph.add_songs_incremental(new_songs)
+                changed = True
+
+        if changed:
+            CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            dj_graph.save_to_pickle(CACHE_PATH)
+            logger.info("Cache updated.")
 
     logger.info(
         "Graph ready: %d node(s), %d edge(s).",

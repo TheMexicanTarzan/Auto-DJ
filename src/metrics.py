@@ -469,3 +469,100 @@ def batch_calculate_weights(
     weight_matrix = np.where(finite_mask, weight_matrix, np.inf)
 
     return weight_matrix.astype(np.float32), finite_mask
+
+
+def batch_calculate_weights_incremental(
+    new_songs: list[Song],
+    existing_songs: list[Song],
+    *,
+    weights: dict[str, float] | None = None,
+) -> tuple[list[tuple[int, int]], list[float], list[tuple[int, int]], list[float]]:
+    """
+    Compute edge weights for new songs against existing songs, and
+    among new songs themselves.  Avoids recomputing existing×existing
+    edges.
+
+    Args:
+        new_songs:      List of newly added Song objects.
+        existing_songs: List of Song objects already in the graph.
+        weights:        Optional metric blending coefficients.
+
+    Returns:
+        A tuple of (cross_edges, cross_weights, internal_edges, internal_weights):
+          - cross_edges:    (new_idx, existing_idx) pairs with finite weight.
+          - cross_weights:  Corresponding weights.
+          - internal_edges: (new_idx_i, new_idx_j) pairs among new songs (upper tri).
+          - internal_weights: Corresponding weights.
+        All indices are *local* — new_idx is relative to new_songs,
+        existing_idx is relative to existing_songs.
+    """
+    w = weights or DEFAULT_WEIGHTS
+    n_new = len(new_songs)
+    n_old = len(existing_songs)
+
+    if n_new == 0:
+        return [], [], [], []
+
+    new_bpms = np.array([s.bpm for s in new_songs], dtype=np.float64)
+    new_keys = [s.key for s in new_songs]
+    new_embs = np.array([s.embedding for s in new_songs], dtype=np.float32)
+
+    cross_edges: list[tuple[int, int]] = []
+    cross_weights: list[float] = []
+
+    # --- Cross edges: new × existing ---
+    if n_old > 0:
+        old_bpms = np.array([s.bpm for s in existing_songs], dtype=np.float64)
+        old_keys = [s.key for s in existing_songs]
+        old_embs = np.array([s.embedding for s in existing_songs], dtype=np.float32)
+
+        # Tempo: (n_new, n_old)
+        new_col = new_bpms[:, np.newaxis]
+        old_row = old_bpms[np.newaxis, :]
+        diff = np.abs(new_col - old_row)
+        min_bpm = np.minimum(new_col, old_row)
+        safe_min = np.where(min_bpm > 0, min_bpm, 1.0)
+        pct_diff = (diff / safe_min) * 100.0
+        tempo_mat = pct_diff / _MAX_BPM_DIFF_PERCENT
+        unmixable = (pct_diff > _MAX_BPM_DIFF_PERCENT) | (new_col <= 0) | (old_row <= 0)
+        tempo_mat = np.where(unmixable, np.inf, tempo_mat)
+
+        finite_mask = np.isfinite(tempo_mat)
+
+        # Harmonic: (n_new, n_old)
+        new_pos = np.array([_key_to_fifths_position(k) for k in new_keys])
+        old_pos = np.array([_key_to_fifths_position(k) for k in old_keys])
+        raw = np.abs(new_pos[:, np.newaxis] - old_pos[np.newaxis, :])
+        harmonic_mat = np.minimum(raw, 12 - raw) / 6.0
+
+        # Semantic: (n_new, n_old)
+        new_norms = np.linalg.norm(new_embs, axis=1, keepdims=True)
+        old_norms = np.linalg.norm(old_embs, axis=1, keepdims=True)
+        safe_new = np.where(new_norms == 0, 1.0, new_norms)
+        safe_old = np.where(old_norms == 0, 1.0, old_norms)
+        normed_new = new_embs / safe_new
+        normed_old = old_embs / safe_old
+        sim_mat = normed_new @ normed_old.T
+        semantic_mat = np.clip((1.0 - sim_mat) / 2.0, 0.0, 1.0)
+
+        weight_mat = (
+            w["harmonic"] * harmonic_mat
+            + w["tempo"] * tempo_mat
+            + w["semantic"] * semantic_mat
+        )
+
+        rows, cols = np.where(finite_mask)
+        cross_edges = list(zip(rows.tolist(), cols.tolist()))
+        cross_weights = weight_mat[rows, cols].tolist()
+
+    # --- Internal edges: new × new (upper triangle) ---
+    internal_edges: list[tuple[int, int]] = []
+    internal_weights: list[float] = []
+
+    if n_new >= 2:
+        int_weight_mat, int_finite = batch_calculate_weights(new_songs, weights=weights)
+        rows, cols = np.where(int_finite)
+        internal_edges = list(zip(rows.tolist(), cols.tolist()))
+        internal_weights = int_weight_mat[rows, cols].tolist()
+
+    return cross_edges, cross_weights, internal_edges, internal_weights

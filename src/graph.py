@@ -42,7 +42,7 @@ from pathlib import Path
 import igraph
 import numpy as np
 
-from src.metrics import batch_calculate_weights
+from src.metrics import batch_calculate_weights, batch_calculate_weights_incremental
 from src.models import Song
 
 logger = logging.getLogger(__name__)
@@ -173,6 +173,130 @@ class DJGraph:
         )
 
     # ------------------------------------------------------------------
+    # Incremental updates
+    # ------------------------------------------------------------------
+
+    @property
+    def known_hashes(self) -> set[str]:
+        """Return the set of content hashes for all songs in the graph."""
+        return {s.content_hash for s in self._songs.values() if s.content_hash}
+
+    def add_songs_incremental(
+        self,
+        new_songs: list[Song],
+        *,
+        weights: dict[str, float] | None = None,
+    ) -> None:
+        """
+        Add new songs to an existing graph, computing only the edges
+        involving the new songs (new×existing + new×new).
+
+        This is O(n_new × n_total) instead of O(n_total²).
+        """
+        if not new_songs:
+            return
+
+        existing_songs = list(self._songs.values())
+        n_old = len(existing_songs)
+
+        # Build index mapping: existing song file_path → igraph vertex index
+        old_vertex_indices = {}
+        if n_old > 0:
+            for i, v in enumerate(self.graph.vs):
+                old_vertex_indices[v["name"]] = v.index
+
+        # Register new songs as vertices
+        first_new_idx = self.graph.vcount()
+        self.graph.add_vertices(len(new_songs))
+        for i, song in enumerate(new_songs):
+            v_idx = first_new_idx + i
+            self.graph.vs[v_idx]["name"] = song.file_path
+            self.graph.vs[v_idx]["filename"] = song.filename
+            self.graph.vs[v_idx]["bpm"] = song.bpm
+            self.graph.vs[v_idx]["key"] = song.key
+            self._songs[song.file_path] = song
+            self._filename_index[song.filename] = song
+
+        # Compute edges incrementally
+        cross_edges, cross_weights, int_edges, int_weights = (
+            batch_calculate_weights_incremental(
+                new_songs, existing_songs, weights=weights,
+            )
+        )
+
+        # Translate local indices to igraph vertex indices
+        edge_list: list[tuple[int, int]] = []
+        weight_list: list[float] = []
+
+        # Cross edges: (new_local_idx, existing_local_idx) → (igraph_idx, igraph_idx)
+        existing_v_indices = [old_vertex_indices[s.file_path] for s in existing_songs] if n_old > 0 else []
+        for new_local, old_local in cross_edges:
+            edge_list.append((first_new_idx + new_local, existing_v_indices[old_local]))
+        weight_list.extend(cross_weights)
+
+        # Internal edges: (new_local_i, new_local_j)
+        for ni, nj in int_edges:
+            edge_list.append((first_new_idx + ni, first_new_idx + nj))
+        weight_list.extend(int_weights)
+
+        if edge_list:
+            existing_edge_count = self.graph.ecount()
+            self.graph.add_edges(edge_list)
+            for i, w in enumerate(weight_list):
+                self.graph.es[existing_edge_count + i]["weight"] = w
+
+        self._sorted_songs_cache = None
+        self.compute_layout()
+
+        logger.info(
+            "Incremental update: added %d song(s), %d edge(s).",
+            len(new_songs),
+            len(edge_list),
+        )
+
+    def remove_songs(self, hashes_to_remove: set[str]) -> None:
+        """
+        Remove songs whose content_hash is in *hashes_to_remove*.
+
+        Deletes the corresponding vertices (and all incident edges)
+        from the igraph graph.
+        """
+        if not hashes_to_remove:
+            return
+
+        # Find vertex indices to remove
+        vertices_to_delete = []
+        songs_to_delete = []
+        for song in self._songs.values():
+            if song.content_hash in hashes_to_remove:
+                try:
+                    v = self.graph.vs.find(name=song.file_path)
+                    vertices_to_delete.append(v.index)
+                except ValueError:
+                    pass
+                songs_to_delete.append(song)
+
+        if not songs_to_delete:
+            return
+
+        # Remove from internal dicts
+        for song in songs_to_delete:
+            self._songs.pop(song.file_path, None)
+            self._filename_index.pop(song.filename, None)
+            self._layout.pop(song.file_path, None)
+
+        # Delete vertices (igraph removes incident edges automatically)
+        # Must delete in reverse index order to avoid index shifting
+        self.graph.delete_vertices(sorted(vertices_to_delete, reverse=True))
+
+        self._sorted_songs_cache = None
+
+        logger.info(
+            "Removed %d song(s) and their edges from the graph.",
+            len(songs_to_delete),
+        )
+
+    # ------------------------------------------------------------------
     # Layout computation
     # ------------------------------------------------------------------
 
@@ -232,6 +356,7 @@ class DJGraph:
                 "bpm": song.bpm,
                 "key": song.key,
                 "embedding_b64": base64.b64encode(emb_bytes).decode("ascii"),
+                "content_hash": song.content_hash,
             })
 
         edges_data = []
@@ -283,6 +408,7 @@ class DJGraph:
                 bpm=s["bpm"],
                 key=s["key"],
                 embedding=emb,
+                content_hash=s.get("content_hash", ""),
             )
             instance._songs[song.file_path] = song
             instance._filename_index[song.filename] = song
@@ -338,6 +464,7 @@ class DJGraph:
                 "bpm": song.bpm,
                 "key": song.key,
                 "embedding": song.embedding,
+                "content_hash": song.content_hash,
             })
 
         edges_data = []
@@ -381,6 +508,7 @@ class DJGraph:
                 bpm=s["bpm"],
                 key=s["key"],
                 embedding=emb,
+                content_hash=s.get("content_hash", ""),
             )
             instance._songs[song.file_path] = song
             instance._filename_index[song.filename] = song

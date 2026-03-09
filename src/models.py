@@ -313,6 +313,7 @@ class Song:
     embedding: np.ndarray = field(default_factory=lambda: np.array([]))
     beat_times: list[float] = field(default_factory=list)
     downbeat_times: list[float] = field(default_factory=list)
+    content_hash: str = ""
 
     # ------------------------------------------------------------------
     # Factory method — the primary way to create a Song from a file

@@ -26,6 +26,7 @@ def _song(
     bpm: float = 120.0,
     key: str = "C major",
     embedding: np.ndarray | None = None,
+    content_hash: str = "",
 ) -> Song:
     """Build a minimal Song with a unique file_path derived from *name*."""
     if embedding is None:
@@ -38,6 +39,7 @@ def _song(
         bpm=bpm,
         key=key,
         embedding=embedding,
+        content_hash=content_hash,
     )
 
 
@@ -434,3 +436,155 @@ class TestPickleSerialization:
         loaded = DJGraph.load_from_pickle(cache_file)
         assert loaded.num_nodes == 0
         assert loaded.num_edges == 0
+
+    def test_content_hash_preserved_pickle(self, tmp_path):
+        s = _song("h.mp3", bpm=120, content_hash="abc123")
+        g = DJGraph.build([s])
+        cache_file = tmp_path / "hash_cache.pkl"
+        g.save_to_pickle(cache_file)
+        loaded = DJGraph.load_from_pickle(cache_file)
+        assert loaded.get_song("h.mp3").content_hash == "abc123"
+
+    def test_content_hash_preserved_json(self, tmp_path):
+        s = _song("h.mp3", bpm=120, content_hash="def456")
+        g = DJGraph.build([s])
+        cache_file = tmp_path / "hash_cache.json"
+        g.save_to_json(cache_file)
+        loaded = DJGraph.load_from_json(cache_file)
+        assert loaded.get_song("h.mp3").content_hash == "def456"
+
+
+# =========================================================================
+# Incremental updates
+# =========================================================================
+
+
+class TestIncrementalAdd:
+    def test_add_songs_incremental_increases_node_count(self):
+        a = _song("a.mp3", bpm=120, key="C major", embedding=_SHARED_EMB, content_hash="aaa")
+        g = DJGraph.build([a])
+        assert g.num_nodes == 1
+
+        b = _song("b.mp3", bpm=121, key="C major", embedding=_SHARED_EMB, content_hash="bbb")
+        g.add_songs_incremental([b])
+        assert g.num_nodes == 2
+
+    def test_add_songs_incremental_creates_edges(self):
+        a = _song("a.mp3", bpm=120, key="C major", embedding=_SHARED_EMB, content_hash="aaa")
+        g = DJGraph.build([a])
+        assert g.num_edges == 0
+
+        b = _song("b.mp3", bpm=121, key="C major", embedding=_SHARED_EMB, content_hash="bbb")
+        g.add_songs_incremental([b])
+        # Should create an edge between a and b (compatible BPMs)
+        assert g.num_edges == 1
+        assert g.edge_weight("a.mp3", "b.mp3") < float("inf")
+
+    def test_add_songs_incremental_no_edge_for_incompatible(self):
+        a = _song("a.mp3", bpm=100, key="C major", embedding=_SHARED_EMB, content_hash="aaa")
+        g = DJGraph.build([a])
+
+        b = _song("b.mp3", bpm=150, key="C major", embedding=_SHARED_EMB, content_hash="bbb")
+        g.add_songs_incremental([b])
+        assert g.num_nodes == 2
+        assert g.num_edges == 0
+
+    def test_add_empty_list_is_noop(self):
+        a = _song("a.mp3", bpm=120, embedding=_SHARED_EMB)
+        g = DJGraph.build([a])
+        g.add_songs_incremental([])
+        assert g.num_nodes == 1
+
+    def test_incremental_songs_are_queryable(self):
+        a = _song("a.mp3", bpm=120, embedding=_SHARED_EMB)
+        g = DJGraph.build([a])
+
+        b = _song("new.mp3", bpm=121, embedding=_SHARED_EMB)
+        g.add_songs_incremental([b])
+
+        assert g.get_song("new.mp3").filename == "new.mp3"
+
+    def test_incremental_pathfinding(self):
+        emb = _SHARED_EMB
+        a = _song("a.mp3", bpm=120, key="C major", embedding=emb)
+        g = DJGraph.build([a])
+
+        b = _song("b.mp3", bpm=121, key="C major", embedding=emb)
+        c = _song("c.mp3", bpm=122, key="C major", embedding=emb)
+        g.add_songs_incremental([b, c])
+
+        path, cost = g.get_shortest_path("a.mp3", "c.mp3")
+        assert len(path) >= 2
+        assert path[0].filename == "a.mp3"
+        assert path[-1].filename == "c.mp3"
+
+    def test_multiple_incremental_batches(self):
+        a = _song("a.mp3", bpm=120, key="C major", embedding=_SHARED_EMB)
+        g = DJGraph.build([a])
+
+        b = _song("b.mp3", bpm=121, key="C major", embedding=_SHARED_EMB)
+        g.add_songs_incremental([b])
+
+        c = _song("c.mp3", bpm=122, key="C major", embedding=_SHARED_EMB)
+        g.add_songs_incremental([c])
+
+        assert g.num_nodes == 3
+        # All three are BPM-compatible, so should have edges
+        assert g.num_edges >= 2
+
+    def test_add_to_empty_graph(self):
+        g = DJGraph.build([])
+        a = _song("a.mp3", bpm=120, key="C major", embedding=_SHARED_EMB)
+        b = _song("b.mp3", bpm=121, key="C major", embedding=_SHARED_EMB)
+        g.add_songs_incremental([a, b])
+        assert g.num_nodes == 2
+        assert g.num_edges == 1
+
+
+class TestRemoveSongs:
+    def test_remove_by_hash(self):
+        a = _song("a.mp3", bpm=120, embedding=_SHARED_EMB, content_hash="hash_a")
+        b = _song("b.mp3", bpm=121, embedding=_SHARED_EMB, content_hash="hash_b")
+        g = DJGraph.build([a, b])
+        assert g.num_nodes == 2
+
+        g.remove_songs({"hash_b"})
+        assert g.num_nodes == 1
+        assert g.get_song("a.mp3").filename == "a.mp3"
+        with pytest.raises(KeyError):
+            g.get_song("b.mp3")
+
+    def test_remove_cleans_up_edges(self):
+        a = _song("a.mp3", bpm=120, embedding=_SHARED_EMB, content_hash="ha")
+        b = _song("b.mp3", bpm=121, embedding=_SHARED_EMB, content_hash="hb")
+        g = DJGraph.build([a, b])
+        assert g.num_edges == 1
+
+        g.remove_songs({"hb"})
+        assert g.num_edges == 0
+
+    def test_remove_empty_set_is_noop(self):
+        a = _song("a.mp3", bpm=120, embedding=_SHARED_EMB, content_hash="ha")
+        g = DJGraph.build([a])
+        g.remove_songs(set())
+        assert g.num_nodes == 1
+
+    def test_remove_nonexistent_hash_is_noop(self):
+        a = _song("a.mp3", bpm=120, embedding=_SHARED_EMB, content_hash="ha")
+        g = DJGraph.build([a])
+        g.remove_songs({"nonexistent"})
+        assert g.num_nodes == 1
+
+
+class TestKnownHashes:
+    def test_known_hashes_returns_all(self):
+        a = _song("a.mp3", content_hash="h1")
+        b = _song("b.mp3", content_hash="h2")
+        g = DJGraph.build([a, b])
+        assert g.known_hashes == {"h1", "h2"}
+
+    def test_known_hashes_excludes_empty(self):
+        a = _song("a.mp3", content_hash="h1")
+        b = _song("b.mp3", content_hash="")
+        g = DJGraph.build([a, b])
+        assert g.known_hashes == {"h1"}

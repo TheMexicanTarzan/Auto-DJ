@@ -114,6 +114,9 @@ def scan_directory(
         seen_hashes[file_hash] = path
         unique_paths.append(path)
 
+    # Reverse map: path → hash (for attaching hashes to Song objects)
+    path_to_hash: dict[Path, str] = {p: h for h, p in seen_hashes.items()}
+
     # --- Phase 2: chunked analyse → embed → build Song loop ---
     songs: list[Song] = []
     processed = 0
@@ -151,6 +154,7 @@ def scan_directory(
                 embedding=embedding,
                 beat_times=analysis.beat_times,
                 downbeat_times=analysis.downbeat_times,
+                content_hash=path_to_hash.get(Path(analysis.file_path), ""),
             ))
 
     logger.info(
@@ -158,4 +162,111 @@ def scan_directory(
         len(songs),
         skipped,
     )
+    return songs
+
+
+def discover_changes(
+    directory: str | Path,
+    known_hashes: set[str],
+) -> tuple[list[Path], set[str]]:
+    """
+    Scan *directory* for audio files and compare against *known_hashes*
+    to find new files and detect removed files.
+
+    Returns:
+        A tuple of (new_paths, removed_hashes) where:
+          - new_paths: list of Paths to files whose content hash is not
+            in *known_hashes* (genuinely new content).
+          - removed_hashes: set of hashes from *known_hashes* that no
+            longer match any file on disk.
+    """
+    root = Path(directory).resolve()
+    if not root.is_dir():
+        raise NotADirectoryError(f"Not a valid directory: {root}")
+
+    audio_files = sorted(
+        p for p in root.rglob("*")
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+    )
+
+    on_disk_hashes: set[str] = set()
+    new_paths: list[Path] = []
+    seen: set[str] = set()  # dedup within this scan
+
+    for path in audio_files:
+        h = _file_hash(path)
+        if h in seen:
+            logger.warning("Skipping duplicate: '%s'.", path)
+            continue
+        seen.add(h)
+        on_disk_hashes.add(h)
+        if h not in known_hashes:
+            new_paths.append(path)
+
+    removed_hashes = known_hashes - on_disk_hashes
+
+    logger.info(
+        "Directory diff: %d new file(s), %d removed file(s).",
+        len(new_paths),
+        len(removed_hashes),
+    )
+    return new_paths, removed_hashes
+
+
+def analyse_new_songs(
+    paths: list[Path],
+    progress_callback: callable | None = None,
+) -> list[Song]:
+    """
+    Analyse a list of audio file paths and return Song objects.
+
+    Same chunked pipeline as scan_directory but without the discovery
+    and deduplication steps (callers are expected to pass already-
+    deduplicated paths from ``discover_changes``).
+    """
+    if not paths:
+        return []
+
+    songs: list[Song] = []
+    total = len(paths)
+    processed = 0
+
+    # Build path→hash map for these files
+    path_to_hash: dict[Path, str] = {}
+    for p in paths:
+        path_to_hash[p] = _file_hash(p)
+
+    for chunk_start in range(0, len(paths), _CHUNK_SIZE):
+        chunk_paths = paths[chunk_start : chunk_start + _CHUNK_SIZE]
+
+        chunk_analyses = []
+        for path in chunk_paths:
+            processed += 1
+            try:
+                analysis = analyse_audio(str(path))
+                chunk_analyses.append(analysis)
+            except Exception:
+                logger.exception("Failed to analyse '%s', skipping.", path)
+            if progress_callback:
+                progress_callback(processed, total, path.name)
+
+        if not chunk_analyses:
+            continue
+
+        audio_list = [(a.audio, a.sr) for a in chunk_analyses]
+        embeddings = compute_embeddings_batch(audio_list, batch_size=_CHUNK_SIZE)
+
+        for analysis, embedding in zip(chunk_analyses, embeddings):
+            songs.append(Song(
+                file_path=analysis.file_path,
+                filename=analysis.filename,
+                bpm=analysis.bpm,
+                key=analysis.key,
+                embedding=embedding,
+                beat_times=analysis.beat_times,
+                downbeat_times=analysis.downbeat_times,
+                content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+            ))
+
+    logger.info("Analysed %d new song(s).", len(songs))
     return songs
