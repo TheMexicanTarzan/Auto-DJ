@@ -37,9 +37,9 @@ class AudioAnalysis(NamedTuple):
 # CLAP model singleton — loaded once, shared across all Song instances.
 # We use laion/clap-htsat-unfused for general-purpose audio embeddings.
 #
-# Heavy libraries (librosa, madmom, essentia, torch, transformers) are
-# imported lazily inside the functions that need them so that cached-graph
-# startups stay fast.
+# Heavy libraries (librosa, essentia, torch, transformers) are imported
+# lazily inside the functions that need them so that cached-graph startups
+# stay fast.
 # ---------------------------------------------------------------------------
 
 _clap_model = None
@@ -99,83 +99,45 @@ def _estimate_key(y: np.ndarray, sr: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Beat / downbeat detection helper  (madmom RNN + DBN)
+# Beat / BPM detection helper  (Essentia RhythmExtractor2013)
 # ---------------------------------------------------------------------------
+
+_RHYTHM_SR = 44100  # RhythmExtractor2013 requires 44100 Hz input
 
 
 def _detect_beats_and_downbeats(
-        path: str | Path,
+        y: np.ndarray,
+        sr: int,
 ) -> tuple[float, list[float], list[float]]:
     """
-    Detect BPM, the full beat grid, and downbeat ("1") locations using
-    ``madmom``'s RNN-based downbeat processor followed by a Dynamic
-    Bayesian Network decoder.
+    Detect BPM and the full beat grid using Essentia's
+    ``RhythmExtractor2013`` algorithm (multifeature method).
 
     Args:
-        path: Path to the audio file.
+        y:  Mono audio waveform as a numpy array.
+        sr: Sample rate of the audio.
 
     Returns:
-        bpm:            Estimated tempo in beats per minute (derived from
-                        the median inter-beat interval).
-        beat_times:     List of *all* beat times in seconds.
-        downbeat_times: List of downbeat times (beat position == 1) in
-                        seconds — critical for DJ phrasing.
+        bpm:            Estimated tempo in beats per minute.
+        beat_times:     List of all detected beat times in seconds.
+        downbeat_times: Always empty — RhythmExtractor2013 does not
+                        distinguish downbeats from other beats.
     """
-    # madmom's Cython code references np.int / np.float / np.complex, which
-    # were removed in NumPy 1.24.  Restore them so madmom works with modern
-    # NumPy without requiring a source patch.
-    for _alias, _builtin in [("int", int), ("float", float), ("complex", complex)]:
-        if not hasattr(np, _alias):
-            setattr(np, _alias, _builtin)
+    import essentia.standard as es
 
-    from madmom.features.downbeats import (
-        DBNDownBeatTrackingProcessor,
-        RNNDownBeatProcessor,
-    )
+    # RhythmExtractor2013 requires 44100 Hz input; resample if needed.
+    if sr != _RHYTHM_SR:
+        import librosa
+        y = librosa.resample(y, orig_sr=sr, target_sr=_RHYTHM_SR)
 
-    # RNNDownBeatProcessor handles its own audio loading internally.
-    proc = RNNDownBeatProcessor()
-    activations = proc(str(path))
+    audio = y.astype(np.float32)
 
-    # DBN decoder: try both 3/4 and 4/4 separately (NumPy 2.x compat).
-    # Passing beats_per_bar=[3, 4] triggers a bug in madmom with newer
-    # NumPy (np.asarray fails on inhomogeneous result arrays), so we
-    # run each meter separately and keep whichever yields more beats.
-    results = []
-    for bpb in [3, 4]:
-        try:
-            dbn = DBNDownBeatTrackingProcessor(beats_per_bar=[bpb], fps=100)
-            beats_candidate = dbn(activations)
-            if len(beats_candidate) > 0:
-                results.append((beats_candidate, len(beats_candidate)))
-        except Exception:
-            continue
+    rhythm_extractor = es.RhythmExtractor2013(method="multifeature")
+    bpm, beats, beats_confidence, _, _ = rhythm_extractor(audio)
 
-    if not results:
-        return 0.0, [], []
+    beat_times: list[float] = beats.tolist() if len(beats) > 0 else []
 
-    # Pick the result with more beats detected
-    beats = max(results, key=lambda x: x[1])[0]
-
-    if len(beats) == 0:
-        return 0.0, [], []
-
-    # ``beats`` is an N×2 array: [[time_seconds, beat_position], ...]
-    # beat_position 1 = downbeat, 2 = second beat, etc.
-    beat_times: list[float] = beats[:, 0].tolist()
-    downbeat_times: list[float] = [
-        float(row[0]) for row in beats if int(round(row[1])) == 1
-    ]
-
-    # Derive BPM from the median inter-beat interval.
-    if len(beat_times) >= 2:
-        intervals = np.diff(beat_times)
-        median_interval = float(np.median(intervals))
-        bpm = 60.0 / median_interval if median_interval > 0 else 0.0
-    else:
-        bpm = 0.0
-
-    return bpm, beat_times, downbeat_times
+    return float(bpm), beat_times, []
 
 
 def analyse_audio(path: str | Path) -> AudioAnalysis:
@@ -212,8 +174,8 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
             f"Audio appears to be silent (RMS={rms:.6f}): {path.name}"
         )
 
-    # Beat / tempo detection (madmom)
-    bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(path)
+    # Beat / tempo detection (Essentia)
+    bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(y, sr)
 
     # Key estimation (Essentia)
     key = _estimate_key(y, sr)
@@ -327,7 +289,7 @@ class Song:
         Steps:
             1. Load the audio with librosa (mono, native sample rate).
             2. Validate the audio (reject files that are too short or silent).
-            3. Estimate BPM, beat grid, and downbeats via madmom.
+            3. Estimate BPM and beat grid via Essentia's RhythmExtractor2013.
             4. Estimate the musical key via Essentia's KeyExtractor.
             5. Extract a CLAP embedding for semantic similarity.
         """
@@ -356,8 +318,8 @@ class Song:
                 f"Audio appears to be silent (RMS={rms:.6f}): {path.name}"
             )
 
-        # --- 3. Beat / tempo detection (madmom) --------------------------
-        bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(path)
+        # --- 3. Beat / tempo detection (Essentia) -------------------------
+        bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(y, sr)
 
         # --- 4. Key estimation (Essentia) ---------------------------------
         key = _estimate_key(y, sr)

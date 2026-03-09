@@ -2,8 +2,7 @@
 Unit tests for the Song model and directory scanner.
 
 These tests use mocking to avoid requiring actual audio files, the
-CLAP model weights, or heavy analysis libraries (madmom, essentia) at
-test time.
+CLAP model weights, or heavy analysis libraries (essentia) at test time.
 """
 
 from __future__ import annotations
@@ -213,72 +212,66 @@ class TestKeyEstimation:
 
 
 # =========================================================================
-# Beat / downbeat detection tests  (madmom)
+# Beat / BPM detection tests  (Essentia RhythmExtractor2013)
 # =========================================================================
 
 
 class TestBeatDetection:
-    @patch.dict(
-        "sys.modules",
-        {
-            "madmom": MagicMock(),
-            "madmom.features": MagicMock(),
-            "madmom.features.downbeats": MagicMock(),
-        },
-    )
     def test_returns_bpm_and_beat_grid(self):
-        """_detect_beats_and_downbeats returns BPM, beats, and downbeats."""
+        """_detect_beats_and_downbeats returns BPM and beat times."""
         import sys
 
-        mock_downbeats_mod = sys.modules["madmom.features.downbeats"]
+        # Simulate RhythmExtractor2013 returning 120 BPM with 8 beats
+        fake_beats = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+        mock_extractor = MagicMock(return_value=(120.0, fake_beats, 0.9, np.array([]), np.array([])))
 
-        # Mock RNNDownBeatProcessor
-        fake_activations = np.random.rand(100, 4)
-        mock_proc = MagicMock(return_value=fake_activations)
-        mock_downbeats_mod.RNNDownBeatProcessor.return_value = mock_proc
+        mock_es = MagicMock()
+        mock_es.RhythmExtractor2013 = MagicMock(return_value=mock_extractor)
 
-        # Mock DBNDownBeatTrackingProcessor — simulate 120 BPM in 4/4
-        fake_beats = np.array([
-            [0.0, 1], [0.5, 2], [1.0, 3], [1.5, 4],
-            [2.0, 1], [2.5, 2], [3.0, 3], [3.5, 4],
-        ])
-        mock_dbn = MagicMock(return_value=fake_beats)
-        mock_downbeats_mod.DBNDownBeatTrackingProcessor.return_value = mock_dbn
+        mock_essentia_pkg = MagicMock()
+        mock_essentia_pkg.standard = mock_es
 
-        bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(
-            "/fake/path.mp3"
-        )
+        saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith("essentia") and k in sys.modules}
+        try:
+            sys.modules["essentia"] = mock_essentia_pkg
+            sys.modules["essentia.standard"] = mock_es
+
+            y = np.random.randn(44100).astype(np.float32)
+            bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(y, sr=44100)
+        finally:
+            for k in list(sys.modules):
+                if k.startswith("essentia"):
+                    del sys.modules[k]
+            sys.modules.update(saved)
 
         assert bpm == pytest.approx(120.0, abs=1.0)
         assert len(beat_times) == 8
-        assert len(downbeat_times) == 2
-        assert downbeat_times[0] == 0.0
-        assert downbeat_times[1] == 2.0
+        assert downbeat_times == []
 
-    @patch.dict(
-        "sys.modules",
-        {
-            "madmom": MagicMock(),
-            "madmom.features": MagicMock(),
-            "madmom.features.downbeats": MagicMock(),
-        },
-    )
     def test_empty_beats_returns_zero(self):
-        """If madmom finds no beats, return 0.0 BPM and empty lists."""
+        """If no beats are found, return 0.0 BPM and empty lists."""
         import sys
 
-        mock_downbeats_mod = sys.modules["madmom.features.downbeats"]
+        mock_extractor = MagicMock(return_value=(0.0, np.array([]), 0.0, np.array([]), np.array([])))
 
-        mock_proc = MagicMock(return_value=np.array([]))
-        mock_downbeats_mod.RNNDownBeatProcessor.return_value = mock_proc
+        mock_es = MagicMock()
+        mock_es.RhythmExtractor2013 = MagicMock(return_value=mock_extractor)
 
-        empty_beats = np.array([]).reshape(0, 2)
-        mock_dbn = MagicMock(return_value=empty_beats)
-        mock_downbeats_mod.DBNDownBeatTrackingProcessor.return_value = mock_dbn
+        mock_essentia_pkg = MagicMock()
+        mock_essentia_pkg.standard = mock_es
 
-        bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(
-            "/fake/path.mp3"
-        )
+        saved = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith("essentia") and k in sys.modules}
+        try:
+            sys.modules["essentia"] = mock_essentia_pkg
+            sys.modules["essentia.standard"] = mock_es
+
+            y = np.random.randn(44100).astype(np.float32)
+            bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(y, sr=44100)
+        finally:
+            for k in list(sys.modules):
+                if k.startswith("essentia"):
+                    del sys.modules[k]
+            sys.modules.update(saved)
 
         assert bpm == 0.0
         assert beat_times == []
