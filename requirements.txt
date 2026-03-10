@@ -16,8 +16,12 @@ torch>=2.0.0
 # Graph & pathfinding
 python-igraph>=0.11.0
 
-# Visualization
-plotly>=5.0.0
+# Web server
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+# Fast JSON serialization
+orjson>=3.9.0
 
 # Utilities
 numpy>=1.24.0

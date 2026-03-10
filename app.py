@@ -1,5 +1,5 @@
 """
-app.py — Plotly Dash web interface for the DJ Mixing Pathfinding System.
+app.py — FastAPI + Sigma.js web interface for the DJ Mixing Pathfinding System.
 
 Run with:
     python app.py
@@ -10,9 +10,9 @@ scanning SONGS_DIRECTORY).  A progress bar is shown while analysis runs.
 
 Once loaded, users can:
 
-    1. Select a start and destination song from searchable dropdowns.
+    1. Select a start and destination song from searchable inputs.
     2. Click "Find Path" to compute the shortest (smoothest) mix path.
-    3. See the path highlighted on a Plotly graph visualisation.
+    3. See the path highlighted on a Sigma.js WebGL graph visualisation.
     4. Click any node to inspect its top-5 nearest neighbours.
 """
 
@@ -20,10 +20,15 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, callback, html, dcc, ctx, no_update
+import orjson
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from src.config import CACHE_PATH, SONGS_DIRECTORY, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
@@ -168,11 +173,11 @@ def _start_loader_thread() -> None:
     thread = threading.Thread(target=_load_graph_background, daemon=True)
     thread.start()
 
+
 # ---------------------------------------------------------------------------
-# Plotly figure helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-_MAX_WEIGHT = 1.0
 _TOP_K_NEIGHBOURS = 5
 
 
@@ -185,615 +190,147 @@ def _get_graph() -> DJGraph | None:
 def _get_progress() -> dict:
     """Return a snapshot of loading progress."""
     with _graph_lock:
-        return dict(_graph_state)
+        return {
+            "ready": _graph_state["ready"],
+            "progress": _graph_state["progress"],
+            "current": _graph_state["current"],
+            "total": _graph_state["total"],
+            "current_file": _graph_state["current_file"],
+            "error": _graph_state["error"],
+        }
 
 
-def _empty_figure() -> go.Figure:
-    """Return an empty Plotly figure with dark styling."""
-    fig = go.Figure()
-    fig.update_layout(
-        showlegend=False,
-        plot_bgcolor="#1a202c",
-        paper_bgcolor="#1a202c",
-        margin=dict(l=0, r=0, t=0, b=0),
-        xaxis=dict(
-            showgrid=False, zeroline=False,
-            showticklabels=False, showline=False,
-        ),
-        yaxis=dict(
-            showgrid=False, zeroline=False,
-            showticklabels=False, showline=False,
-        ),
+def _orjson_response(data: object, status_code: int = 200) -> Response:
+    """Return a fast JSON response using orjson."""
+    return Response(
+        content=orjson.dumps(data),
+        media_type="application/json",
+        status_code=status_code,
     )
-    return fig
 
 
-def _build_plotly_figure(
-    graph: DJGraph,
-    path_node_ids: list[str] | None = None,
-    path_edge_set: set[tuple[str, str]] | None = None,
-) -> go.Figure:
-    """Build a Plotly figure with go.Scattergl node and edge traces."""
-    if graph.num_nodes == 0:
-        return _empty_figure()
+# ---------------------------------------------------------------------------
+# FastAPI application
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    _start_loader_thread()
+    yield
+
+
+app = FastAPI(title="Auto-DJ Mix Pathfinder", lifespan=_lifespan)
+
+
+# ---------------------------------------------------------------------------
+# API endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/status")
+def api_status():
+    """Return current loading progress."""
+    return _orjson_response(_get_progress())
+
+
+@app.get("/api/graph")
+def api_graph():
+    """Return the full graph (nodes + edges) for the frontend."""
+    graph = _get_graph()
+    if graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
 
     coords = graph.layout_coords
-    path_nodes = set(path_node_ids) if path_node_ids else set()
-    path_edges = path_edge_set or set()
 
-    # ---- Edges ----
-    edge_x: list[float | None] = []
-    edge_y: list[float | None] = []
-    pedge_x: list[float | None] = []
-    pedge_y: list[float | None] = []
+    nodes = []
+    for song in graph.songs:
+        x, y = coords.get(song.file_path, (0.0, 0.0))
+        nodes.append({
+            "id": song.file_path,
+            "label": song.filename,
+            "x": x,
+            "y": y,
+            "bpm": song.bpm,
+            "key": song.key,
+        })
 
+    edges = []
     for edge in graph.graph.es:
         src_name = graph.graph.vs[edge.source]["name"]
         dst_name = graph.graph.vs[edge.target]["name"]
-        x0, y0 = coords[src_name]
-        x1, y1 = coords[dst_name]
+        edges.append({
+            "source": src_name,
+            "target": dst_name,
+            "weight": edge["weight"],
+        })
 
-        if (src_name, dst_name) in path_edges:
-            pedge_x.extend([x0, x1, None])
-            pedge_y.extend([y0, y1, None])
-        else:
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
-
-    # ---- Nodes ----
-    node_x, node_y, node_text, node_ids = [], [], [], []
-    pnode_x, pnode_y, pnode_text, pnode_ids = [], [], [], []
-
-    for song in graph.songs:
-        x, y = coords[song.file_path]
-        text = f"{song.filename}<br>BPM: {song.bpm} | Key: {song.key}"
-
-        if song.file_path in path_nodes:
-            pnode_x.append(x)
-            pnode_y.append(y)
-            pnode_text.append(text)
-            pnode_ids.append(song.file_path)
-        else:
-            node_x.append(x)
-            node_y.append(y)
-            node_text.append(text)
-            node_ids.append(song.file_path)
-
-    fig = go.Figure()
-
-    # Regular edges
-    if edge_x:
-        fig.add_trace(go.Scattergl(
-            x=edge_x, y=edge_y,
-            mode="lines",
-            line=dict(color="#cbd5e0", width=0.5),
-            opacity=0.3,
-            hoverinfo="none",
-            showlegend=False,
-        ))
-
-    # Regular nodes
-    if node_x:
-        fig.add_trace(go.Scattergl(
-            x=node_x, y=node_y,
-            mode="markers",
-            marker=dict(
-                size=8,
-                color="#6c7a89",
-                line=dict(width=1, color="#4a5568"),
-            ),
-            text=node_text,
-            customdata=node_ids,
-            hoverinfo="text",
-            showlegend=False,
-        ))
-
-    # Highlighted path edges
-    if pedge_x:
-        fig.add_trace(go.Scattergl(
-            x=pedge_x, y=pedge_y,
-            mode="lines",
-            line=dict(color="#e53e3e", width=3),
-            opacity=1.0,
-            hoverinfo="none",
-            showlegend=False,
-        ))
-
-    # Highlighted path nodes
-    if pnode_x:
-        fig.add_trace(go.Scattergl(
-            x=pnode_x, y=pnode_y,
-            mode="markers",
-            marker=dict(
-                size=14,
-                color="#e53e3e",
-                line=dict(width=2, color="#c53030"),
-            ),
-            text=pnode_text,
-            customdata=pnode_ids,
-            hoverinfo="text",
-            showlegend=False,
-        ))
-
-    fig.update_layout(
-        showlegend=False,
-        plot_bgcolor="#1a202c",
-        paper_bgcolor="#1a202c",
-        margin=dict(l=0, r=0, t=0, b=0),
-        xaxis=dict(
-            showgrid=False, zeroline=False,
-            showticklabels=False, showline=False,
-            scaleanchor="y", scaleratio=1,
-        ),
-        yaxis=dict(
-            showgrid=False, zeroline=False,
-            showticklabels=False, showline=False,
-        ),
-        hovermode="closest",
-    )
-
-    return fig
+    return _orjson_response({
+        "nodes": nodes,
+        "edges": edges,
+        "num_nodes": graph.num_nodes,
+        "num_edges": graph.num_edges,
+    })
 
 
-# ---------------------------------------------------------------------------
-# Dash app + dynamic layout
-# ---------------------------------------------------------------------------
-
-app = Dash(__name__, suppress_callback_exceptions=True)
-app.title = "Auto-DJ Mix Pathfinder"
-
-
-def _make_layout():
-    """Build the layout dynamically on each page load.
-
-    When the graph is already loaded (e.g. from the JSON cache), the
-    initial HTML is served with the main content *already visible* and
-    the loading overlay hidden.
-
-    The Plotly figure is populated via a one-shot ``populate-interval``
-    callback to keep the initial HTML payload small.
-    """
-    progress = _get_progress()
+@app.get("/api/songs")
+def api_songs():
+    """Return a lightweight song list for dropdown population."""
     graph = _get_graph()
-    is_ready = progress["ready"] and graph is not None
+    if graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
 
-    # Pre-compute lightweight values when the graph is already loaded.
-    # Heavy data (Plotly figure) is loaded via callback to keep
-    # the initial HTML small.
-    if is_ready:
-        overlay_style = {"display": "none"}
-        main_style = {"display": "flex", "height": "calc(100vh - 90px)"}
-        song_options = [
-            {"label": f"{s.filename}  ({s.bpm} BPM, {s.key})", "value": s.file_path}
-            for s in graph.songs
-        ]
-        stats_text = (
-            f"{graph.num_nodes} tracks loaded | "
-            f"{graph.num_edges} possible transitions"
-        )
-        progress_interval_disabled = True
-        bar_width = "100%"
-        progress_text = "Done!"
-        ready_flag = True
-        # One-shot interval to populate the figure after page
-        # renders (keeps initial HTML small).
-        populate_disabled = False
-    else:
-        overlay_style = {
-            "display": "flex",
-            "flexDirection": "column",
-            "alignItems": "center",
-            "justifyContent": "center",
-            "height": "calc(100vh - 90px)",
-            "padding": "40px",
-        }
-        main_style = {"display": "none", "height": "calc(100vh - 90px)"}
-        song_options = []
-        stats_text = "Loading tracks..."
-        progress_interval_disabled = False
-        bar_width = f'{progress["progress"]}%'
-        progress_text = "Starting up..."
-        ready_flag = False
-        # Figure will be populated by update_progress when the graph
-        # finishes loading, so the one-shot interval is not needed.
-        populate_disabled = True
-
-    return html.Div(
-        style={
-            "fontFamily": "'Segoe UI', Roboto, sans-serif",
-            "backgroundColor": "#1a202c",
-            "color": "#e2e8f0",
-            "minHeight": "100vh",
-            "padding": "0",
-            "margin": "0",
-        },
-        children=[
-            # Interval timer that polls loading progress (1 s)
-            dcc.Interval(
-                id="progress-interval",
-                interval=1000,
-                n_intervals=0,
-                disabled=progress_interval_disabled,
-            ),
-            # One-shot interval that populates the figure after
-            # the page has rendered (fires once, 200 ms after load).
-            dcc.Interval(
-                id="populate-interval",
-                interval=200,
-                n_intervals=0,
-                max_intervals=1,
-                disabled=populate_disabled,
-            ),
-            # Hidden store for graph-ready flag
-            dcc.Store(id="graph-ready", data=ready_flag),
-            # Header
-            html.Div(
-                id="header",
-                style={
-                    "background": "linear-gradient(135deg, #2d3748, #4a5568)",
-                    "padding": "20px 30px",
-                    "borderBottom": "2px solid #e53e3e",
-                },
-                children=[
-                    html.H1(
-                        "Auto-DJ Mix Pathfinder",
-                        style={"margin": "0", "fontSize": "28px", "color": "#e2e8f0"},
-                    ),
-                    html.P(
-                        id="header-stats",
-                        children=stats_text,
-                        style={"margin": "5px 0 0 0", "color": "#a0aec0", "fontSize": "14px"},
-                    ),
-                ],
-            ),
-            # Loading overlay
-            html.Div(
-                id="loading-overlay",
-                style=overlay_style,
-                children=[
-                    html.H2(
-                        "Analysing your music library...",
-                        style={"color": "#e2e8f0", "marginBottom": "20px"},
-                    ),
-                    html.Div(
-                        style={
-                            "width": "60%",
-                            "maxWidth": "500px",
-                            "backgroundColor": "#2d3748",
-                            "borderRadius": "8px",
-                            "overflow": "hidden",
-                            "height": "30px",
-                            "border": "1px solid #4a5568",
-                        },
-                        children=[
-                            html.Div(
-                                id="progress-bar",
-                                style={
-                                    "width": bar_width,
-                                    "height": "100%",
-                                    "backgroundColor": "#e53e3e",
-                                    "transition": "width 0.5s ease",
-                                    "borderRadius": "8px",
-                                },
-                            ),
-                        ],
-                    ),
-                    html.P(
-                        id="progress-text",
-                        children=progress_text,
-                        style={
-                            "color": "#a0aec0",
-                            "marginTop": "12px",
-                            "fontSize": "14px",
-                        },
-                    ),
-                ],
-            ),
-            # Main content: sidebar + graph
-            html.Div(
-                id="main-content",
-                style=main_style,
-                children=[
-                    # ---- Left sidebar (controls + details) ----
-                    html.Div(
-                        style={
-                            "width": "360px",
-                            "minWidth": "360px",
-                            "backgroundColor": "#2d3748",
-                            "padding": "20px",
-                            "overflowY": "auto",
-                            "borderRight": "1px solid #4a5568",
-                        },
-                        children=[
-                            # -- Pathfinding controls --
-                            html.H3(
-                                "Pathfinding",
-                                style={"marginTop": "0", "color": "#e2e8f0"},
-                            ),
-                            html.Label(
-                                "Start Song",
-                                style={"fontSize": "13px", "color": "#a0aec0"},
-                            ),
-                            dcc.Dropdown(
-                                id="start-dropdown",
-                                options=song_options,
-                                placeholder="Search for a track...",
-                                searchable=True,
-                                style={
-                                    "marginBottom": "12px",
-                                    "backgroundColor": "#4a5568",
-                                    "color": "#1a202c",
-                                },
-                            ),
-                            html.Label(
-                                "Destination Song",
-                                style={"fontSize": "13px", "color": "#a0aec0"},
-                            ),
-                            dcc.Dropdown(
-                                id="end-dropdown",
-                                options=song_options,
-                                placeholder="Search for a track...",
-                                searchable=True,
-                                style={
-                                    "marginBottom": "12px",
-                                    "backgroundColor": "#4a5568",
-                                    "color": "#1a202c",
-                                },
-                            ),
-                            html.Button(
-                                "Find Path",
-                                id="find-path-btn",
-                                n_clicks=0,
-                                style={
-                                    "width": "100%",
-                                    "padding": "10px",
-                                    "backgroundColor": "#e53e3e",
-                                    "color": "#ffffff",
-                                    "border": "none",
-                                    "borderRadius": "6px",
-                                    "cursor": "pointer",
-                                    "fontSize": "15px",
-                                    "fontWeight": "bold",
-                                },
-                            ),
-                            # -- Path results --
-                            html.Div(
-                                id="path-output",
-                                style={
-                                    "marginTop": "18px",
-                                    "padding": "14px",
-                                    "backgroundColor": "#1a202c",
-                                    "borderRadius": "6px",
-                                    "fontSize": "13px",
-                                    "whiteSpace": "pre-wrap",
-                                    "maxHeight": "260px",
-                                    "overflowY": "auto",
-                                    "border": "1px solid #4a5568",
-                                },
-                                children="Select two songs and click Find Path.",
-                            ),
-                            html.Hr(style={"borderColor": "#4a5568", "margin": "20px 0"}),
-                            # -- Node details panel --
-                            html.H3(
-                                "Track Details",
-                                style={"marginTop": "0", "color": "#e2e8f0"},
-                            ),
-                            html.Div(
-                                id="node-details",
-                                style={
-                                    "padding": "14px",
-                                    "backgroundColor": "#1a202c",
-                                    "borderRadius": "6px",
-                                    "fontSize": "13px",
-                                    "whiteSpace": "pre-wrap",
-                                    "maxHeight": "280px",
-                                    "overflowY": "auto",
-                                    "border": "1px solid #4a5568",
-                                },
-                                children="Click a node on the graph to see details.",
-                            ),
-                        ],
-                    ),
-                    # ---- Graph area ----
-                    html.Div(
-                        style={"flex": "1", "position": "relative"},
-                        children=[
-                            dcc.Graph(
-                                id="graph-display",
-                                figure=_empty_figure(),
-                                style={"width": "100%", "height": "100%"},
-                                config={
-                                    "scrollZoom": True,
-                                    "displayModeBar": False,
-                                },
-                            ),
-                        ],
-                    ),
-                ],
-            ),
-        ],
-    )
+    songs = [
+        {"id": s.file_path, "label": f"{s.filename}  ({s.bpm} BPM, {s.key})"}
+        for s in graph.songs
+    ]
+    return _orjson_response(songs)
 
 
-app.layout = _make_layout
+class PathRequest(BaseModel):
+    start: str
+    end: str
 
 
-# ---------------------------------------------------------------------------
-# Callback — One-shot figure population (fires once after page render)
-# ---------------------------------------------------------------------------
-
-
-@callback(
-    Output("graph-display", "figure"),
-    Input("populate-interval", "n_intervals"),
-    State("graph-ready", "data"),
-    prevent_initial_call=True,
-)
-def populate_figure(n_intervals, ready):
-    """Fill the Plotly graph after the page has rendered.
-
-    Triggered once by the ``populate-interval`` (200 ms after load).
-    Keeping the figure out of the initial HTML avoids a massive payload
-    that would block the browser and cause async-chunk timeouts.
-    """
-    if not ready:
-        return no_update
+@app.post("/api/path")
+def api_path(req: PathRequest):
+    """Compute shortest path between two songs."""
     graph = _get_graph()
-    return _build_plotly_figure(graph) if graph else _empty_figure()
+    if graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
 
-
-# ---------------------------------------------------------------------------
-# Callback — Progress polling + transition to main UI
-# ---------------------------------------------------------------------------
-
-
-@callback(
-    Output("progress-bar", "style"),
-    Output("progress-text", "children"),
-    Output("loading-overlay", "style"),
-    Output("main-content", "style"),
-    Output("header-stats", "children"),
-    Output("graph-display", "figure", allow_duplicate=True),
-    Output("start-dropdown", "options"),
-    Output("end-dropdown", "options"),
-    Output("progress-interval", "disabled"),
-    Output("graph-ready", "data"),
-    Input("progress-interval", "n_intervals"),
-    State("graph-ready", "data"),
-    prevent_initial_call=True,
-)
-def update_progress(n_intervals, already_ready):
-    """Poll background loader and flip to main UI when done.
-
-    This callback only fires while the graph is still loading (the
-    interval is disabled once the graph is ready).  When the graph was
-    loaded from cache, the function layout already serves the ready
-    state, so this callback never fires at all.
-    """
-    if already_ready:
-        return (no_update,) * 10
-
-    progress = _get_progress()
-
-    bar_style = {
-        "width": f'{progress["progress"]}%',
-        "height": "100%",
-        "backgroundColor": "#e53e3e",
-        "transition": "width 0.5s ease",
-        "borderRadius": "8px",
-    }
-
-    if progress.get("error"):
-        return (
-            bar_style,
-            f'Error: {progress["error"]}',
-            {"display": "flex", "flexDirection": "column", "alignItems": "center",
-             "justifyContent": "center", "height": "calc(100vh - 90px)", "padding": "40px"},
-            {"display": "none", "height": "calc(100vh - 90px)"},
-            "Error loading tracks",
-            _empty_figure(),
-            [],
-            [],
-            True,
-            False,
+    if not req.start or not req.end:
+        return _orjson_response(
+            {"error": "Please select both a start and destination song."},
+            status_code=400,
         )
 
-    if progress["ready"]:
-        graph = _get_graph()
-        figure = _build_plotly_figure(graph) if graph else _empty_figure()
-        song_options = [
-            {"label": f"{s.filename}  ({s.bpm} BPM, {s.key})", "value": s.file_path}
-            for s in graph.songs
-        ] if graph else []
-        stats = (
-            f"{graph.num_nodes} tracks loaded | "
-            f"{graph.num_edges} possible transitions"
-        ) if graph else "No tracks loaded"
-
-        return (
-            bar_style,
-            "Done!",
-            {"display": "none"},
-            {"display": "flex", "height": "calc(100vh - 90px)"},
-            stats,
-            figure,
-            song_options,
-            song_options,
-            True,   # stop polling
-            True,
-        )
-
-    # Still loading
-    current = progress["current"]
-    total = progress["total"]
-    pct = progress["progress"]
-    fname = progress["current_file"]
-
-    if fname == "cache":
-        text = "Loading graph from cache..."
-    elif total > 0:
-        text = f"Analysing track {current} of {total} ({pct}%) — {fname}"
-    else:
-        text = "Scanning for audio files..."
-
-    return (
-        bar_style,
-        text,
-        {"display": "flex", "flexDirection": "column", "alignItems": "center",
-         "justifyContent": "center", "height": "calc(100vh - 90px)", "padding": "40px"},
-        {"display": "none", "height": "calc(100vh - 90px)"},
-        "Loading tracks...",
-        _empty_figure(),
-        [],
-        [],
-        False,
-        False,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Callback — Pathfinding
-# ---------------------------------------------------------------------------
-
-
-@callback(
-    Output("path-output", "children"),
-    Output("graph-display", "figure", allow_duplicate=True),
-    Input("find-path-btn", "n_clicks"),
-    State("start-dropdown", "value"),
-    State("end-dropdown", "value"),
-    State("graph-ready", "data"),
-    prevent_initial_call=True,
-)
-def find_path(n_clicks: int, start_fp: str | None, end_fp: str | None, ready: bool):
-    """Compute shortest path and highlight it on the graph."""
-    graph = _get_graph()
-    if not graph or not ready:
-        return "Graph is still loading, please wait...", _empty_figure()
-
-    if not start_fp or not end_fp:
-        return "Please select both a start and destination song.", _build_plotly_figure(graph)
-
-    if start_fp == end_fp:
-        song = graph.get_song(start_fp)
-        figure = _build_plotly_figure(graph, path_node_ids=[start_fp])
-        return f"Start and destination are the same track:\n  {song.filename}", figure
+    if req.start == req.end:
+        try:
+            song = graph.get_song(req.start)
+        except KeyError as exc:
+            return _orjson_response({"error": str(exc)}, status_code=404)
+        return _orjson_response({
+            "path_nodes": [song.file_path],
+            "path_edges": [],
+            "summary": f"Start and destination are the same track:\n  {song.filename}",
+            "total_cost": 0.0,
+        })
 
     try:
-        path, total_cost = graph.get_shortest_path(start_fp, end_fp)
+        path, total_cost = graph.get_shortest_path(req.start, req.end)
     except NoPathError:
-        return (
-            "No mixable path exists between these two tracks.\n"
-            "The BPM gap at every intermediate step is too large.",
-            _build_plotly_figure(graph),
-        )
+        return _orjson_response({
+            "error": (
+                "No mixable path exists between these two tracks.\n"
+                "The BPM gap at every intermediate step is too large."
+            ),
+        }, status_code=404)
     except KeyError as exc:
-        return f"Song not found: {exc}", _build_plotly_figure(graph)
+        return _orjson_response({"error": f"Song not found: {exc}"}, status_code=404)
 
     # Build text summary
     lines = ["SHORTEST MIX PATH", "=" * 40]
     path_node_ids = [s.file_path for s in path]
-    path_edge_set: set[tuple[str, str]] = set()
+    path_edges = []
 
     for i, song in enumerate(path):
         prefix = "START" if i == 0 else f"  [{i}]"
@@ -803,70 +340,61 @@ def find_path(n_clicks: int, start_fp: str | None, end_fp: str | None, ready: bo
         if i < len(path) - 1:
             hop_cost = calculate_weight(song, path[i + 1])
             lines.append(f"          -> cost: {hop_cost:.4f}")
-            path_edge_set.add((song.file_path, path[i + 1].file_path))
+            path_edges.append([song.file_path, path[i + 1].file_path])
 
     lines.append("-" * 40)
     lines.append(f"Total cost: {total_cost:.4f}  |  Hops: {len(path) - 1}")
 
-    figure = _build_plotly_figure(graph, path_node_ids, path_edge_set)
-    return "\n".join(lines), figure
+    return _orjson_response({
+        "path_nodes": path_node_ids,
+        "path_edges": path_edges,
+        "summary": "\n".join(lines),
+        "total_cost": total_cost,
+    })
 
 
-# ---------------------------------------------------------------------------
-# Callback — Node inspection (click a node)
-# ---------------------------------------------------------------------------
-
-
-@callback(
-    Output("node-details", "children"),
-    Input("graph-display", "clickData"),
-    State("graph-ready", "data"),
-    prevent_initial_call=True,
-)
-def inspect_node(click_data: dict | None, ready: bool):
-    """Show metadata and top-K neighbours for a clicked node."""
+@app.get("/api/neighbors/{node_id:path}")
+def api_neighbors(node_id: str):
+    """Return a node's metadata and its top-K nearest neighbours."""
     graph = _get_graph()
-    if not graph or not ready:
-        return "Graph is still loading, please wait..."
-
-    if click_data is None:
-        return "Click a node on the graph to see details."
-
-    # Extract file_path from the clicked point's customdata.
-    # Edge traces have no customdata, so we skip those clicks.
-    point = click_data["points"][0]
-    file_path = point.get("customdata")
-    if not file_path:
-        return "Click a node on the graph to see details."
+    if graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
 
     try:
-        song = graph.get_song(file_path)
+        song = graph.get_song(node_id)
     except KeyError:
-        return f"Unknown node: {file_path}"
+        return _orjson_response({"error": f"Unknown node: {node_id}"}, status_code=404)
 
-    neighbours = graph.neighbours(file_path)
+    neighbours = graph.neighbours(node_id)
     top_k = neighbours[:_TOP_K_NEIGHBOURS]
 
-    lines = [
-        f"{song.filename}",
-        f"BPM: {song.bpm}  |  Key: {song.key}",
-        f"Path: {song.file_path}",
-        "",
-        f"Top {_TOP_K_NEIGHBOURS} Mixable Tracks:",
-        "-" * 36,
-    ]
+    return _orjson_response({
+        "node": {
+            "id": song.file_path,
+            "label": song.filename,
+            "bpm": song.bpm,
+            "key": song.key,
+        },
+        "neighbors": [
+            {
+                "id": nbr.file_path,
+                "label": nbr.filename,
+                "bpm": nbr.bpm,
+                "key": nbr.key,
+                "cost": round(cost, 4),
+            }
+            for nbr, cost in top_k
+        ],
+    })
 
-    if not top_k:
-        lines.append("  (no compatible neighbours)")
-    else:
-        for rank, (nbr, cost) in enumerate(top_k, 1):
-            lines.append(
-                f"  {rank}. {nbr.filename}\n"
-                f"     BPM: {nbr.bpm} | Key: {nbr.key}\n"
-                f"     Transition cost: {cost:.4f}"
-            )
 
-    return "\n".join(lines)
+# ---------------------------------------------------------------------------
+# Static files — serve the frontend
+# ---------------------------------------------------------------------------
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+# Serve index.html at the root
+app.mount("/", StaticFiles(directory="static", html=True), name="root")
 
 
 # ---------------------------------------------------------------------------
@@ -874,9 +402,5 @@ def inspect_node(click_data: dict | None, ready: bool):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Start the background loader thread, then the server.
-    # use_reloader=False prevents Werkzeug from re-importing the module
-    # in a child process (which would discard the loaded graph).
-    
     _start_loader_thread()
-    app.run(debug=True, use_reloader=False, host="127.0.0.1", port=8050)
+    uvicorn.run(app, host="127.0.0.1", port=8050)

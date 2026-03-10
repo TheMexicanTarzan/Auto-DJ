@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auto-DJ Mix Pathfinder</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <h1>Auto-DJ Mix Pathfinder</h1>
+    <p id="header-stats">Loading tracks...</p>
+  </header>
+
+  <!-- Loading overlay -->
+  <div id="loading-overlay">
+    <h2>Analysing your music library...</h2>
+    <div class="progress-track">
+      <div class="progress-fill" id="progress-bar"></div>
+    </div>
+    <p id="progress-text">Starting up...</p>
+  </div>
+
+  <!-- Main content (hidden until graph ready) -->
+  <div id="main-content">
+    <!-- Left sidebar -->
+    <aside>
+      <h3>Pathfinding</h3>
+
+      <label for="start-search">Start Song</label>
+      <div class="search-wrapper">
+        <input type="text" id="start-search" placeholder="Search for a track..." autocomplete="off">
+        <div class="search-results" id="start-results"></div>
+      </div>
+
+      <label for="end-search">Destination Song</label>
+      <div class="search-wrapper">
+        <input type="text" id="end-search" placeholder="Search for a track..." autocomplete="off">
+        <div class="search-results" id="end-results"></div>
+      </div>
+
+      <button id="find-path-btn">Find Path</button>
+
+      <div id="path-output">Select two songs and click Find Path.</div>
+
+      <hr>
+
+      <h3>Track Details</h3>
+      <div id="node-details">Click a node on the graph to see details.</div>
+    </aside>
+
+    <!-- Graph container -->
+    <div id="sigma-container"></div>
+  </div>
+
+  <!-- Dependencies from CDN (no build step) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/graphology/0.25.4/graphology.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sigma.js/3.0.0-beta.9/sigma.min.js"></script>
+
+  <!-- App logic -->
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,229 @@
+/* Auto-DJ Mix Pathfinder — Dark Theme */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: 'Segoe UI', Roboto, sans-serif;
+  background-color: #1a202c;
+  color: #e2e8f0;
+  overflow: hidden;
+}
+
+/* ---- Header ---- */
+
+header {
+  background: linear-gradient(135deg, #2d3748, #4a5568);
+  padding: 20px 30px;
+  border-bottom: 2px solid #e53e3e;
+}
+
+header h1 {
+  font-size: 28px;
+  color: #e2e8f0;
+  margin: 0;
+}
+
+header p {
+  margin: 5px 0 0 0;
+  color: #a0aec0;
+  font-size: 14px;
+}
+
+/* ---- Loading overlay ---- */
+
+#loading-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: calc(100vh - 90px);
+  padding: 40px;
+}
+
+#loading-overlay h2 {
+  color: #e2e8f0;
+  margin-bottom: 20px;
+}
+
+.progress-track {
+  width: 60%;
+  max-width: 500px;
+  background-color: #2d3748;
+  border-radius: 8px;
+  overflow: hidden;
+  height: 30px;
+  border: 1px solid #4a5568;
+}
+
+.progress-fill {
+  width: 0%;
+  height: 100%;
+  background-color: #e53e3e;
+  transition: width 0.5s ease;
+  border-radius: 8px;
+}
+
+#progress-text {
+  color: #a0aec0;
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+/* ---- Main layout ---- */
+
+#main-content {
+  display: none;
+  height: calc(100vh - 90px);
+}
+
+#main-content.visible {
+  display: flex;
+}
+
+/* ---- Sidebar ---- */
+
+aside {
+  width: 360px;
+  min-width: 360px;
+  background-color: #2d3748;
+  padding: 20px;
+  overflow-y: auto;
+  border-right: 1px solid #4a5568;
+}
+
+aside h3 {
+  margin-top: 0;
+  color: #e2e8f0;
+}
+
+aside label {
+  font-size: 13px;
+  color: #a0aec0;
+  display: block;
+  margin-bottom: 4px;
+}
+
+aside hr {
+  border: none;
+  border-top: 1px solid #4a5568;
+  margin: 20px 0;
+}
+
+/* ---- Search inputs ---- */
+
+.search-wrapper {
+  position: relative;
+  margin-bottom: 12px;
+}
+
+.search-wrapper input {
+  width: 100%;
+  padding: 8px 10px;
+  background-color: #4a5568;
+  color: #e2e8f0;
+  border: 1px solid #4a5568;
+  border-radius: 6px;
+  font-size: 14px;
+  outline: none;
+}
+
+.search-wrapper input:focus {
+  border-color: #e53e3e;
+}
+
+.search-wrapper input::placeholder {
+  color: #a0aec0;
+}
+
+.search-results {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  background-color: #2d3748;
+  border: 1px solid #4a5568;
+  border-radius: 0 0 6px 6px;
+  z-index: 100;
+}
+
+.search-results.open {
+  display: block;
+}
+
+.search-results .result-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-results .result-item:hover,
+.search-results .result-item.active {
+  background-color: #4a5568;
+}
+
+/* ---- Buttons ---- */
+
+#find-path-btn {
+  width: 100%;
+  padding: 10px;
+  background-color: #e53e3e;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: bold;
+  transition: background-color 0.15s;
+}
+
+#find-path-btn:hover {
+  background-color: #c53030;
+}
+
+#find-path-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---- Output panels ---- */
+
+#path-output,
+#node-details {
+  margin-top: 18px;
+  padding: 14px;
+  background-color: #1a202c;
+  border-radius: 6px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid #4a5568;
+  font-family: 'Consolas', 'Monaco', monospace;
+  line-height: 1.5;
+}
+
+#node-details {
+  max-height: 280px;
+}
+
+/* ---- Sigma container ---- */
+
+#sigma-container {
+  flex: 1;
+  position: relative;
+  background-color: #1a202c;
+}
