@@ -123,7 +123,22 @@ def _load_graph_background() -> None:
                 CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
                 graph.save_to_pickle(CACHE_PATH)
 
+        # Mark graph as ready BEFORE the incremental sync so the UI is
+        # usable immediately.  The sync will update the graph in-place
+        # (protected by _graph_lock) if any changes are found.
+        with _graph_lock:
+            _graph_state["graph"] = graph
+            _graph_state["ready"] = True
+            _graph_state["progress"] = 100
+
+        logger.info(
+            "Graph ready: %d node(s), %d edge(s).",
+            graph.num_nodes,
+            graph.num_edges,
+        )
+
         # --- Incremental sync: detect new/removed songs ---
+        # Runs AFTER the graph is already serving requests.
         try:
             new_paths, removed_hashes = discover_changes(
                 SONGS_DIRECTORY, graph.known_hashes,
@@ -150,17 +165,6 @@ def _load_graph_background() -> None:
             CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
             graph.save_to_pickle(CACHE_PATH)
             logger.info("Cache updated with library changes.")
-
-        with _graph_lock:
-            _graph_state["graph"] = graph
-            _graph_state["ready"] = True
-            _graph_state["progress"] = 100
-
-        logger.info(
-            "Graph ready: %d node(s), %d edge(s).",
-            graph.num_nodes,
-            graph.num_edges,
-        )
 
     except Exception as exc:
         logger.exception("Failed to build graph.")
@@ -402,5 +406,6 @@ app.mount("/", StaticFiles(directory="static", html=True), name="root")
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    _start_loader_thread()
+    # _start_loader_thread() is called by the FastAPI lifespan handler —
+    # do NOT call it here or the graph will be loaded twice.
     uvicorn.run(app, host="127.0.0.1", port=8050)
