@@ -58,9 +58,14 @@ async function pollStatus() {
     }
 
     if (data.ready) {
-      progressText.textContent = "Done!";
       clearInterval(pollTimer);
-      await loadGraph();
+      progressText.textContent = "Loading graph...";
+      try {
+        await loadGraph();
+      } catch (loadErr) {
+        console.error("Failed to load graph:", loadErr);
+        progressText.textContent = "Error loading graph: " + loadErr.message;
+      }
       return;
     }
 
