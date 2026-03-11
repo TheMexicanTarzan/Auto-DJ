@@ -125,6 +125,10 @@ async function loadGraph() {
 
   graphInstance = graph;
 
+  // Switch views BEFORE creating Sigma so the container has dimensions
+  loadingOverlay.style.display = "none";
+  mainContent.classList.add("visible");
+
   // Instantiate Sigma renderer
   const container = document.getElementById("sigma-container");
   sigmaInstance = new Sigma(graph, container, {
@@ -153,10 +157,6 @@ async function loadGraph() {
 
   // Populate search inputs
   populateSearch();
-
-  // Switch views
-  loadingOverlay.style.display = "none";
-  mainContent.classList.add("visible");
 }
 
 // =========================================================================
