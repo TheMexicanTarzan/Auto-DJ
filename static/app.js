@@ -453,7 +453,47 @@ function clearHighlights() {
 }
 
 // =========================================================================
-// 7. Bootstrap
+// 7. Recompute layout
+// =========================================================================
+
+document.getElementById("recompute-layout-btn").addEventListener("click", async function () {
+  var btn = document.getElementById("recompute-layout-btn");
+  var statusEl = document.getElementById("layout-status");
+  btn.disabled = true;
+  statusEl.textContent = "Recomputing layout...";
+
+  try {
+    var resp = await fetch("/api/recompute-layout", { method: "POST" });
+    var result = await resp.json();
+
+    if (result.error) {
+      statusEl.textContent = "Error: " + result.error;
+      return;
+    }
+
+    // Fetch updated coordinates
+    var graphResp = await fetch("/api/graph");
+    var graphData = await graphResp.json();
+
+    // Update node positions in graphology
+    graphData.nodes.forEach(function (n) {
+      if (graphInstance.hasNode(n.id)) {
+        graphInstance.setNodeAttribute(n.id, "x", n.x);
+        graphInstance.setNodeAttribute(n.id, "y", n.y);
+      }
+    });
+
+    sigmaInstance.refresh();
+    statusEl.textContent = "Layout updated.";
+  } catch (err) {
+    statusEl.textContent = "Failed: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// =========================================================================
+// 8. Bootstrap
 // =========================================================================
 
 startPolling();

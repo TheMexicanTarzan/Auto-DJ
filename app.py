@@ -357,6 +357,20 @@ def api_path(req: PathRequest):
     })
 
 
+@app.post("/api/recompute-layout")
+def api_recompute_layout():
+    """Recompute the graph layout and save to cache."""
+    graph = _get_graph()
+    if graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
+
+    graph.compute_layout()
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    graph.save_to_pickle(CACHE_PATH)
+
+    return _orjson_response({"ok": True})
+
+
 @app.get("/api/neighbors/{node_id:path}")
 def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K):
     """Return a node's metadata and its top-K nearest neighbours."""
