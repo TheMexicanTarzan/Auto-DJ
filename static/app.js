@@ -245,8 +245,10 @@ async function onClickNode(event) {
   var detailsEl = document.getElementById("node-details");
   detailsEl.textContent = "Loading...";
 
+  var k = parseInt(document.getElementById("top-k-input").value, 10) || 10;
+
   try {
-    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId));
+    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId) + "?k=" + k);
     var data = await resp.json();
 
     if (data.error) {
@@ -259,7 +261,7 @@ async function onClickNode(event) {
       "BPM: " + data.node.bpm + "  |  Key: " + data.node.key,
       "Path: " + data.node.id,
       "",
-      "Top 5 Mixable Tracks:",
+      "Top " + data.neighbors.length + " Mixable Tracks:",
       "------------------------------------",
     ];
 

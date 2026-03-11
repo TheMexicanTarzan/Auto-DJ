@@ -110,6 +110,22 @@ aside label {
   margin-bottom: 4px;
 }
 
+#top-k-input {
+  width: 70px;
+  padding: 6px 8px;
+  margin-bottom: 12px;
+  background-color: #4a5568;
+  color: #e2e8f0;
+  border: 1px solid #4a5568;
+  border-radius: 6px;
+  font-size: 14px;
+  outline: none;
+}
+
+#top-k-input:focus {
+  border-color: #e53e3e;
+}
+
 aside hr {
   border: none;
   border-top: 1px solid #4a5568;

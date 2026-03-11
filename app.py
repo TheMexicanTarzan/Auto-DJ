@@ -182,7 +182,7 @@ def _start_loader_thread() -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TOP_K_NEIGHBOURS = 5
+_DEFAULT_TOP_K = 10
 
 
 def _get_graph() -> DJGraph | None:
@@ -358,7 +358,7 @@ def api_path(req: PathRequest):
 
 
 @app.get("/api/neighbors/{node_id:path}")
-def api_neighbors(node_id: str):
+def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K):
     """Return a node's metadata and its top-K nearest neighbours."""
     graph = _get_graph()
     if graph is None:
@@ -370,7 +370,7 @@ def api_neighbors(node_id: str):
         return _orjson_response({"error": f"Unknown node: {node_id}"}, status_code=404)
 
     neighbours = graph.neighbours(node_id)
-    top_k = neighbours[:_TOP_K_NEIGHBOURS]
+    top_k = neighbours[:max(1, min(k, 50))]
 
     return _orjson_response({
         "node": {
