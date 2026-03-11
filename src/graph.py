@@ -301,7 +301,7 @@ class DJGraph:
     # ------------------------------------------------------------------
 
     def compute_layout(
-        self, algorithm: str = "fruchterman_reingold",
+        self, algorithm: str = "fruchterman_reingold", **kwargs,
     ) -> dict[str, tuple[float, float]]:
         """
         Compute 2D layout coordinates using an igraph layout algorithm.
@@ -309,6 +309,14 @@ class DJGraph:
         Args:
             algorithm: Layout algorithm name (e.g. 'fruchterman_reingold',
                        'kamada_kawai', 'drl', 'lgl').
+            **kwargs:  Extra parameters forwarded to the igraph layout method.
+                       For fruchterman_reingold the most useful are:
+                         niter     – iteration count (default 500)
+                         coolexp   – cooling exponent (default 1.5)
+                         repulserad – repulsion radius (default n³)
+                         area      – layout area (default n²)
+                         maxdelta  – max displacement per step (default n)
+                         weights   – edge attribute name or weight list
 
         Returns:
             Dict mapping file_path → (x, y) coordinates.
@@ -317,7 +325,7 @@ class DJGraph:
             self._layout = {}
             return self._layout
 
-        layout = self.graph.layout(algorithm)
+        layout = self.graph.layout(algorithm, **kwargs)
 
         self._layout = {}
         for v in self.graph.vs:
