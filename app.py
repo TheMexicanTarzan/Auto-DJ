@@ -25,7 +25,7 @@ from pathlib import Path
 
 import orjson
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -358,13 +358,19 @@ def api_path(req: PathRequest):
 
 
 @app.post("/api/recompute-layout")
-def api_recompute_layout():
+async def api_recompute_layout(request: Request):
     """Recompute the graph layout and save to cache."""
     graph = _get_graph()
     if graph is None:
         return _orjson_response({"error": "Graph not ready"}, status_code=503)
 
-    graph.compute_layout()
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    layout_kwargs = {}
+    for key in ("niter", "coolexp", "repulserad", "area", "maxdelta"):
+        if key in body:
+            layout_kwargs[key] = body[key]
+
+    graph.compute_layout(**layout_kwargs)
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     graph.save_to_pickle(CACHE_PATH)
 

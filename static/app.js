@@ -469,7 +469,21 @@ document.getElementById("recompute-layout-btn").addEventListener("click", async 
   statusEl.textContent = "Recomputing layout...";
 
   try {
-    var resp = await fetch("/api/recompute-layout", { method: "POST" });
+    var body = {};
+    var niter = document.getElementById("layout-niter").value;
+    var coolexp = document.getElementById("layout-coolexp").value;
+    var repulserad = document.getElementById("layout-repulserad").value;
+    var area = document.getElementById("layout-area").value;
+    if (niter) body.niter = Number(niter);
+    if (coolexp) body.coolexp = Number(coolexp);
+    if (repulserad) body.repulserad = Number(repulserad);
+    if (area) body.area = Number(area);
+
+    var resp = await fetch("/api/recompute-layout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
     var result = await resp.json();
 
     if (result.error) {
