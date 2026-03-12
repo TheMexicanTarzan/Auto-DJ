@@ -333,7 +333,7 @@ class DJGraph:
             "coolexp": 1.0,
             "repulserad": n ** 3,
             "area": n ** 2,
-            "weights": "weight",
+            "weights": self.graph.es["weight"],
         }
 
         if algorithm == "fruchterman_reingold":
