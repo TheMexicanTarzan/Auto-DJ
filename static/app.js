@@ -241,7 +241,10 @@ function onLeaveNode() {
 }
 
 async function onClickNode(event) {
-  var nodeId = event.node;
+  loadNodeDetails(event.node);
+}
+
+async function loadNodeDetails(nodeId) {
   var detailsEl = document.getElementById("node-details");
   detailsEl.textContent = "Loading...";
 
@@ -293,6 +296,9 @@ function populateSearch() {
   });
   setupAutocomplete("end-search", "end-results", function (id) {
     endId = id;
+  });
+  setupAutocomplete("details-search", "details-results", function (id) {
+    loadNodeDetails(id);
   });
 }
 

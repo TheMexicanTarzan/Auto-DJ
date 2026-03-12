@@ -325,13 +325,23 @@ class DJGraph:
             self._layout = {}
             return self._layout
 
-        layout = self.graph.layout(algorithm,
-                                   niter=2000,
-                                   coolexp=1.0,
-                                   repulserad=1088 ** 50,
-                                   area=1088 ** 4,
-                                   weights="weight",
-                                   )
+        n = self.graph.vcount()
+
+        # Sensible FR defaults — can be overridden via **kwargs.
+        fr_defaults = {
+            "niter": 2000,
+            "coolexp": 1.0,
+            "repulserad": n ** 3,
+            "area": n ** 2,
+            "weights": "weight",
+        }
+
+        if algorithm == "fruchterman_reingold":
+            merged = {**fr_defaults, **kwargs}
+        else:
+            merged = kwargs
+
+        layout = self.graph.layout(algorithm, **merged)
 
         self._layout = {}
         for v in self.graph.vs:
