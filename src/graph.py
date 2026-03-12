@@ -325,7 +325,13 @@ class DJGraph:
             self._layout = {}
             return self._layout
 
-        layout = self.graph.layout(algorithm, **kwargs)
+        layout = self.graph.layout(algorithm,
+                                   niter=2000,
+                                   coolexp=1.0,
+                                   repulserad=1088 ** 50,
+                                   area=1088 ** 4,
+                                   weights="weight",
+                                   )
 
         self._layout = {}
         for v in self.graph.vs:
