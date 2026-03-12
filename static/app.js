@@ -471,13 +471,9 @@ document.getElementById("recompute-layout-btn").addEventListener("click", async 
   try {
     var body = {};
     var niter = document.getElementById("layout-niter").value;
-    var coolexp = document.getElementById("layout-coolexp").value;
-    var repulserad = document.getElementById("layout-repulserad").value;
-    var area = document.getElementById("layout-area").value;
+    var startTemp = document.getElementById("layout-start-temp").value;
     if (niter) body.niter = Number(niter);
-    if (coolexp) body.coolexp = Number(coolexp);
-    if (repulserad) body.repulserad = Number(repulserad);
-    if (area) body.area = Number(area);
+    if (startTemp) body.start_temp = Number(startTemp);
 
     var resp = await fetch("/api/recompute-layout", {
       method: "POST",

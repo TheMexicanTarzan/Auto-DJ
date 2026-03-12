@@ -366,7 +366,7 @@ async def api_recompute_layout(request: Request):
 
     body = await request.json() if request.headers.get("content-type") == "application/json" else {}
     layout_kwargs = {}
-    for key in ("niter", "coolexp", "repulserad", "area", "maxdelta"):
+    for key in ("niter", "start_temp"):
         if key in body:
             layout_kwargs[key] = body[key]
 
