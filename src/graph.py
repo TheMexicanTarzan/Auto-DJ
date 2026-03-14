@@ -310,11 +310,13 @@ class DJGraph:
             algorithm: Layout algorithm name (e.g. 'fruchterman_reingold',
                        'kamada_kawai', 'drl', 'lgl').
             **kwargs:  Extra parameters forwarded to the igraph layout method.
-                       For fruchterman_reingold the valid params are:
-                         niter      – iteration count (default 500)
-                         start_temp – max displacement per step (default sqrt(n)/10)
-                         weights    – edge weight list or attribute name
-                         grid       – "auto", True/False for grid-based speed-up
+                       For fruchterman_reingold the most useful are:
+                         niter     – iteration count (default 500)
+                         coolexp   – cooling exponent (default 1.5)
+                         repulserad – repulsion radius (default n³)
+                         area      – layout area (default n²)
+                         maxdelta  – max displacement per step (default n)
+                         weights   – edge attribute name or weight list
 
         Returns:
             Dict mapping file_path → (x, y) coordinates.
@@ -328,8 +330,8 @@ class DJGraph:
         # Sensible FR defaults — can be overridden via **kwargs.
         fr_defaults = {
             "niter": 2000,
-            "start_temp": max(10.0, n ** 0.5),
-            "weights": "weight",
+            "start_temp": 100,
+            "weights": self.graph.es["weight"],
         }
 
         if algorithm == "fruchterman_reingold":
