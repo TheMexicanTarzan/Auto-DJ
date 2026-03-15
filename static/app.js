@@ -227,6 +227,48 @@ async function loadGraph() {
   loadingOverlay.style.display = "none";
   mainContent.classList.add("visible");
 
+  // Custom label renderer: draws a dark pill behind label text for contrast
+  function drawLabelWithBackground(context, data, settings) {
+    if (!data.label) return;
+
+    var size = settings.labelSize;
+    var font = settings.labelFont;
+    var text = data.label;
+
+    context.font = (data.forceLabel ? "bold " : "") + size + "px " + font;
+
+    var textWidth = context.measureText(text).width;
+    var padX = 4;
+    var padY = 2;
+    var x = data.x + data.size + 3;
+    var y = data.y + size / 3;
+
+    // Draw background pill
+    var bgX = x - padX;
+    var bgY = y - size + padY;
+    var bgW = textWidth + padX * 2;
+    var bgH = size + padY * 2;
+    var radius = 3;
+
+    context.fillStyle = "rgba(26, 32, 44, 0.85)";
+    context.beginPath();
+    context.moveTo(bgX + radius, bgY);
+    context.lineTo(bgX + bgW - radius, bgY);
+    context.quadraticCurveTo(bgX + bgW, bgY, bgX + bgW, bgY + radius);
+    context.lineTo(bgX + bgW, bgY + bgH - radius);
+    context.quadraticCurveTo(bgX + bgW, bgY + bgH, bgX + bgW - radius, bgY + bgH);
+    context.lineTo(bgX + radius, bgY + bgH);
+    context.quadraticCurveTo(bgX, bgY + bgH, bgX, bgY + bgH - radius);
+    context.lineTo(bgX, bgY + radius);
+    context.quadraticCurveTo(bgX, bgY, bgX + radius, bgY);
+    context.closePath();
+    context.fill();
+
+    // Draw text
+    context.fillStyle = data.labelColor || settings.labelColor.color || "#e2e8f0";
+    context.fillText(text, x, y);
+  }
+
   // Instantiate Sigma renderer
   var container = document.getElementById("sigma-container");
   sigmaInstance = new Sigma(graphInstance, container, {
@@ -238,6 +280,7 @@ async function loadGraph() {
     labelFont: "Segoe UI, Roboto, sans-serif",
     labelSize: 12,
     labelRenderedSizeThreshold: 100,
+    defaultDrawNodeLabel: drawLabelWithBackground,
     zIndex: false,
     // --- Reducers for selective rendering ---
     nodeReducer: nodeReducer,
@@ -343,7 +386,7 @@ function nodeReducer(node, data) {
     res.color = "#fc8181";
     res.size = 5;
     res.label = data.label;
-    res.labelColor = "#000000";
+    res.labelColor = "#ffffff";
     res.zIndex = 3;
     res.forceLabel = true;
   } else if (isNeighbor) {
