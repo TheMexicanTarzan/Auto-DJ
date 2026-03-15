@@ -25,7 +25,7 @@ from pathlib import Path
 
 import orjson
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -58,6 +58,7 @@ _graph_state: dict = {
     "current": 0,
     "current_file": "",
     "error": None,          # str | None
+    "version": 0,           # bumped on every graph mutation
 }
 
 
@@ -129,6 +130,7 @@ def _load_graph_background() -> None:
             _graph_state["graph"] = graph
             _graph_state["ready"] = True
             _graph_state["progress"] = 100
+            _graph_state["version"] += 1
 
         logger.info(
             "Graph ready: %d node(s), %d edge(s).",
@@ -161,6 +163,8 @@ def _load_graph_background() -> None:
                 sync_changed = True
 
         if sync_changed:
+            with _graph_lock:
+                _graph_state["version"] += 1
             CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
             graph.save_to_pickle(CACHE_PATH)
             logger.info("Cache updated with library changes.")
@@ -188,6 +192,12 @@ def _get_graph() -> DJGraph | None:
     """Return the graph if ready, else None."""
     with _graph_lock:
         return _graph_state["graph"] if _graph_state["ready"] else None
+
+
+def _get_graph_version() -> int:
+    """Return the current graph version counter."""
+    with _graph_lock:
+        return _graph_state["version"]
 
 
 def _get_progress() -> dict:
@@ -236,11 +246,15 @@ def api_status():
 
 
 @app.get("/api/graph")
-def api_graph():
+def api_graph(request: Request):
     """Return the full graph (nodes + edges) for the frontend."""
     graph = _get_graph()
     if graph is None:
         return _orjson_response({"error": "Graph not ready"}, status_code=503)
+
+    etag = f'W/"{_get_graph_version()}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304)
 
     coords = graph.layout_coords
 
@@ -256,45 +270,65 @@ def api_graph():
             "key": song.key,
         })
 
-    has_edge_type = "edge_type" in graph.graph.es.attributes() if graph.graph.ecount() > 0 else False
-    edges = []
-    for edge in graph.graph.es:
-        src_name = graph.graph.vs[edge.source]["name"]
-        dst_name = graph.graph.vs[edge.target]["name"]
-        edges.append({
-            "source": src_name,
-            "target": dst_name,
-            "weight": edge["weight"],
-            "edge_type": (edge["edge_type"] or "direct") if has_edge_type else "direct",
-        })
+    # Bulk-extract edge attributes to avoid per-edge igraph lookups
+    g = graph.graph
+    ecount = g.ecount()
+    if ecount > 0:
+        edge_list = g.get_edgelist()
+        vertex_names = g.vs["name"]
+        weights = g.es["weight"]
+        has_edge_type = "edge_type" in g.es.attributes()
+        edge_types = g.es["edge_type"] if has_edge_type else None
 
-    # Count edges by type
-    type_counts: dict[str, int] = {}
-    for e in edges:
-        t = e.get("edge_type", "direct")
-        type_counts[t] = type_counts.get(t, 0) + 1
+        edges = [None] * ecount
+        type_counts: dict[str, int] = {}
+        for i in range(ecount):
+            src_idx, dst_idx = edge_list[i]
+            etype = (edge_types[i] or "direct") if edge_types else "direct"
+            edges[i] = {
+                "source": vertex_names[src_idx],
+                "target": vertex_names[dst_idx],
+                "weight": weights[i],
+                "edge_type": etype,
+            }
+            type_counts[etype] = type_counts.get(etype, 0) + 1
+    else:
+        edges = []
+        type_counts = {}
 
-    return _orjson_response({
-        "nodes": nodes,
-        "edges": edges,
-        "num_nodes": graph.num_nodes,
-        "num_edges": graph.num_edges,
-        "edge_type_counts": type_counts,
-    })
+    return Response(
+        content=orjson.dumps({
+            "nodes": nodes,
+            "edges": edges,
+            "num_nodes": graph.num_nodes,
+            "num_edges": graph.num_edges,
+            "edge_type_counts": type_counts,
+        }),
+        media_type="application/json",
+        headers={"ETag": etag},
+    )
 
 
 @app.get("/api/songs")
-def api_songs():
+def api_songs(request: Request):
     """Return a lightweight song list for dropdown population."""
     graph = _get_graph()
     if graph is None:
         return _orjson_response({"error": "Graph not ready"}, status_code=503)
 
+    etag = f'W/"{_get_graph_version()}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304)
+
     songs = [
         {"id": s.file_path, "label": f"{s.filename}  ({s.bpm} BPM, {s.key})"}
         for s in graph.songs
     ]
-    return _orjson_response(songs)
+    return Response(
+        content=orjson.dumps(songs),
+        media_type="application/json",
+        headers={"ETag": etag},
+    )
 
 
 class PathRequest(BaseModel):
@@ -435,6 +469,9 @@ def api_recalculate(req: RecalculateRequest):
     }
 
     graph.recalculate_edges(weights=weights, type_penalties=type_penalties)
+
+    with _graph_lock:
+        _graph_state["version"] += 1
 
     # Persist to cache
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)

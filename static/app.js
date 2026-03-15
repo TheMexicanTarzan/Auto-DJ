@@ -50,9 +50,23 @@ var hoveredNeighbors = new Set();
 var hoveredEdgeKeys = new Set();
 var detailNode = null;        // node selected via details/click
 
+// Pre-computed adjacency cache: nodeId -> { neighbors: Set, edges: Set }
+var adjacencyCache = new Map();
+
 // =========================================================================
 // Helpers
 // =========================================================================
+
+/** Build adjacency cache from the current graphInstance. */
+function buildAdjacencyCache() {
+  adjacencyCache.clear();
+  graphInstance.forEachNode(function (node) {
+    adjacencyCache.set(node, {
+      neighbors: new Set(graphInstance.neighbors(node)),
+      edges: new Set(graphInstance.edges(node)),
+    });
+  });
+}
 
 /** Read the tempo-type checkboxes and return an array of allowed types. */
 function getAllowedTypes() {
@@ -176,6 +190,7 @@ async function loadGraph() {
   songList = await songsResp.json();
 
   graphInstance = buildGraphology(graphData);
+  buildAdjacencyCache();
 
   // Switch views BEFORE creating Sigma so the container has dimensions
   loadingOverlay.style.display = "none";
@@ -246,6 +261,7 @@ async function reloadGraphData() {
     }
   });
 
+  buildAdjacencyCache();
   sigmaInstance.refresh();
   updateHeaderStats(graphData);
 }
@@ -255,6 +271,19 @@ async function reloadGraphData() {
 // =========================================================================
 
 function nodeReducer(node, data) {
+  // Fast path: nothing active — return data as-is (zero allocation)
+  if (highlightedNodes.size === 0 && hoveredNode === null && detailNode === null) {
+    return data;
+  }
+
+  // Only allocate a copy when we actually need to modify something
+  var needsCopy = highlightedNodes.size > 0
+    || (detailNode !== null && node === detailNode)
+    || node === hoveredNode
+    || hoveredNeighbors.has(node);
+
+  if (!needsCopy) return data;
+
   var res = Object.assign({}, data);
 
   if (highlightedNodes.size > 0) {
@@ -286,7 +315,6 @@ function nodeReducer(node, data) {
       res.label = data.label;
       res.zIndex = 3;
     } else if (hoveredNeighbors.has(node)) {
-      // Neighbour of hovered node — keep visible
       res.color = res.color === "#e53e3e" ? "#e53e3e" : "#a0aec0";
       res.size = res.size > 2 ? res.size : 2.5;
       res.label = data.label;
@@ -297,27 +325,31 @@ function nodeReducer(node, data) {
 }
 
 function edgeReducer(edge, data) {
+  // Fast path: check the two cheap conditions first
+  var isHighlighted = highlightedEdges.has(edge);
+  var isHovered = hoveredNode !== null && hoveredEdgeKeys.has(edge);
+
+  // If neither highlighted nor hovered, hide without allocating a copy
+  if (!isHighlighted && !isHovered) {
+    if (data.hidden) return data;
+    var hidden = Object.assign({}, data);
+    hidden.hidden = true;
+    return hidden;
+  }
+
   var res = Object.assign({}, data);
   var etype = data.edge_type || "direct";
 
-  // Default: hide all edges for performance
-  res.hidden = true;
-
-  // Show highlighted (path) edges — colored by edge type
-  if (highlightedEdges.has(edge)) {
+  if (isHighlighted) {
     res.hidden = false;
     res.color = edgePathColor(etype);
     res.size = 1.5;
     res.zIndex = 2;
-  }
-
-  // Show edges of hovered node — muted type colors
-  if (hoveredNode !== null && hoveredEdgeKeys.has(edge)) {
+  } else {
+    // isHovered must be true
     res.hidden = false;
-    if (!highlightedEdges.has(edge)) {
-      res.color = edgeHoverColor(etype);
-      res.size = 0.5;
-    }
+    res.color = edgeHoverColor(etype);
+    res.size = 0.5;
   }
 
   return res;
@@ -329,8 +361,14 @@ function edgeReducer(edge, data) {
 
 function onEnterNode(event) {
   hoveredNode = event.node;
-  hoveredNeighbors = new Set(graphInstance.neighbors(event.node));
-  hoveredEdgeKeys = new Set(graphInstance.edges(event.node));
+  var cached = adjacencyCache.get(event.node);
+  if (cached) {
+    hoveredNeighbors = cached.neighbors;
+    hoveredEdgeKeys = cached.edges;
+  } else {
+    hoveredNeighbors = new Set(graphInstance.neighbors(event.node));
+    hoveredEdgeKeys = new Set(graphInstance.edges(event.node));
+  }
   sigmaInstance.refresh({ skipIndexation: true });
 }
 
@@ -417,40 +455,48 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
   var input = document.getElementById(inputId);
   var resultsDiv = document.getElementById(resultsId);
   var activeIndex = -1;
+  var debounceTimer = null;
 
   input.addEventListener("input", function () {
-    var query = input.value.toLowerCase().trim();
-    resultsDiv.innerHTML = "";
-    activeIndex = -1;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(function () {
+      var query = input.value.toLowerCase().trim();
+      activeIndex = -1;
 
-    if (query.length < 1) {
-      resultsDiv.classList.remove("open");
-      return;
-    }
-
-    var matches = songList.filter(function (s) {
-      return s.label.toLowerCase().indexOf(query) !== -1;
-    }).slice(0, 50);  // Limit results
-
-    if (matches.length === 0) {
-      resultsDiv.classList.remove("open");
-      return;
-    }
-
-    matches.forEach(function (m) {
-      var div = document.createElement("div");
-      div.className = "result-item";
-      div.textContent = m.label;
-      div.addEventListener("mousedown", function (e) {
-        e.preventDefault();
-        input.value = m.label;
-        onSelect(m.id);
+      if (query.length < 1) {
+        resultsDiv.innerHTML = "";
         resultsDiv.classList.remove("open");
-      });
-      resultsDiv.appendChild(div);
-    });
+        return;
+      }
 
-    resultsDiv.classList.add("open");
+      var matches = songList.filter(function (s) {
+        return s.label.toLowerCase().indexOf(query) !== -1;
+      }).slice(0, 50);
+
+      if (matches.length === 0) {
+        resultsDiv.innerHTML = "";
+        resultsDiv.classList.remove("open");
+        return;
+      }
+
+      var frag = document.createDocumentFragment();
+      matches.forEach(function (m) {
+        var div = document.createElement("div");
+        div.className = "result-item";
+        div.textContent = m.label;
+        div.addEventListener("mousedown", function (e) {
+          e.preventDefault();
+          input.value = m.label;
+          onSelect(m.id);
+          resultsDiv.classList.remove("open");
+        });
+        frag.appendChild(div);
+      });
+
+      resultsDiv.innerHTML = "";
+      resultsDiv.appendChild(frag);
+      resultsDiv.classList.add("open");
+    }, 100);
   });
 
   input.addEventListener("keydown", function (e) {
@@ -544,16 +590,9 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
     });
 
     // Find edge keys in graphology for each path edge pair
+    // (undirected graph — edge() returns the key regardless of argument order)
     result.path_edges.forEach(function (pair) {
-      var src = pair[0];
-      var dst = pair[1];
-      // graphology edge key lookup
-      var edgeKey = graphInstance.edge(src, dst);
-      if (edgeKey != null) {
-        highlightedEdges.add(edgeKey);
-      }
-      // Try reverse for undirected
-      edgeKey = graphInstance.edge(dst, src);
+      var edgeKey = graphInstance.edge(pair[0], pair[1]);
       if (edgeKey != null) {
         highlightedEdges.add(edgeKey);
       }
