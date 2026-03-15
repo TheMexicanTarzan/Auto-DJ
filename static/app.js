@@ -27,6 +27,8 @@ let endId = null;
 const highlightedNodes = new Set();
 const highlightedEdges = new Set();
 let hoveredNode = null;
+let hoveredNeighbors = new Set();   // cached neighbor node IDs for hovered node
+let hoveredEdgeKeys = new Set();    // cached edge keys for hovered node
 
 // =========================================================================
 // 1. Progress polling
@@ -106,7 +108,7 @@ async function loadGraph() {
       x: n.x,
       y: n.y,
       label: n.label,
-      size: 4,
+      size: 2,
       color: "#6c7a89",
       bpm: n.bpm,
       key: n.key,
@@ -169,12 +171,12 @@ function nodeReducer(node, data) {
   if (highlightedNodes.size > 0) {
     if (highlightedNodes.has(node)) {
       res.color = "#e53e3e";
-      res.size = 8;
+      res.size = 4;
       res.zIndex = 2;
       res.label = data.label;
     } else {
       res.color = "#4a5568";
-      res.size = 3;
+      res.size = 1.5;
       res.label = null;
       res.zIndex = 0;
     }
@@ -183,13 +185,13 @@ function nodeReducer(node, data) {
   if (hoveredNode !== null) {
     if (node === hoveredNode) {
       res.color = "#fc8181";
-      res.size = 10;
+      res.size = 5;
       res.label = data.label;
       res.zIndex = 3;
-    } else if (graphInstance.hasEdge(node, hoveredNode) || graphInstance.hasEdge(hoveredNode, node)) {
+    } else if (hoveredNeighbors.has(node)) {
       // Neighbour of hovered node — keep visible
       res.color = res.color === "#e53e3e" ? "#e53e3e" : "#a0aec0";
-      res.size = res.size > 4 ? res.size : 5;
+      res.size = res.size > 2 ? res.size : 2.5;
       res.label = data.label;
     }
   }
@@ -207,19 +209,16 @@ function edgeReducer(edge, data) {
   if (highlightedEdges.has(edge)) {
     res.hidden = false;
     res.color = "#e53e3e";
-    res.size = 3;
+    res.size = 1.5;
     res.zIndex = 2;
   }
 
   // Show edges of hovered node
-  if (hoveredNode !== null) {
-    var extremities = graphInstance.extremities(edge);
-    if (extremities[0] === hoveredNode || extremities[1] === hoveredNode) {
-      res.hidden = false;
-      if (!highlightedEdges.has(edge)) {
-        res.color = "#718096";
-        res.size = 1;
-      }
+  if (hoveredNode !== null && hoveredEdgeKeys.has(edge)) {
+    res.hidden = false;
+    if (!highlightedEdges.has(edge)) {
+      res.color = "#718096";
+      res.size = 0.5;
     }
   }
 
@@ -232,12 +231,16 @@ function edgeReducer(edge, data) {
 
 function onEnterNode(event) {
   hoveredNode = event.node;
-  sigmaInstance.refresh();
+  hoveredNeighbors = new Set(graphInstance.neighbors(event.node));
+  hoveredEdgeKeys = new Set(graphInstance.edges(event.node));
+  sigmaInstance.refresh({ skipIndexation: true });
 }
 
 function onLeaveNode() {
   hoveredNode = null;
-  sigmaInstance.refresh();
+  hoveredNeighbors.clear();
+  hoveredEdgeKeys.clear();
+  sigmaInstance.refresh({ skipIndexation: true });
 }
 
 async function onClickNode(event) {
@@ -459,57 +462,7 @@ function clearHighlights() {
 }
 
 // =========================================================================
-// 7. Recompute layout
-// =========================================================================
-
-document.getElementById("recompute-layout-btn").addEventListener("click", async function () {
-  var btn = document.getElementById("recompute-layout-btn");
-  var statusEl = document.getElementById("layout-status");
-  btn.disabled = true;
-  statusEl.textContent = "Recomputing layout...";
-
-  try {
-    var body = {};
-    var niter = document.getElementById("layout-niter").value;
-    var startTemp = document.getElementById("layout-start-temp").value;
-    if (niter) body.niter = Number(niter);
-    if (startTemp) body.start_temp = Number(startTemp);
-
-    var resp = await fetch("/api/recompute-layout", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    var result = await resp.json();
-
-    if (result.error) {
-      statusEl.textContent = "Error: " + result.error;
-      return;
-    }
-
-    // Fetch updated coordinates
-    var graphResp = await fetch("/api/graph");
-    var graphData = await graphResp.json();
-
-    // Update node positions in graphology
-    graphData.nodes.forEach(function (n) {
-      if (graphInstance.hasNode(n.id)) {
-        graphInstance.setNodeAttribute(n.id, "x", n.x);
-        graphInstance.setNodeAttribute(n.id, "y", n.y);
-      }
-    });
-
-    sigmaInstance.refresh();
-    statusEl.textContent = "Layout updated.";
-  } catch (err) {
-    statusEl.textContent = "Failed: " + err.message;
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-// =========================================================================
-// 8. Bootstrap
+// 7. Bootstrap
 // =========================================================================
 
 startPolling();
