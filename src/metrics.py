@@ -566,3 +566,277 @@ def batch_calculate_weights_incremental(
         internal_weights = int_weight_mat[rows, cols].tolist()
 
     return cross_edges, cross_weights, internal_edges, internal_weights
+
+
+# =========================================================================
+# 6. Multi-type tempo edge computation (direct / double / triplet)
+# =========================================================================
+#
+# DJs can also mix tracks whose tempos are related by integer/simple
+# ratios:
+#
+#   - **Double tempo** (2× or 0.5×):  A 140 BPM track over a 70 BPM
+#     track (or vice-versa).  Common in drum-and-bass ↔ half-time,
+#     or dubstep ↔ garage transitions.
+#
+#   - **Triplet** (3/2× or 3/4×):  A 150 BPM track over a 100 BPM
+#     track.  Creates a polyrhythmic "triplet feel" blend.
+#
+# The same 8 % tolerance is applied *after* scaling one BPM by the
+# relevant factor.
+# =========================================================================
+
+EDGE_TYPE_NONE: int = 0
+EDGE_TYPE_DIRECT: int = 1
+EDGE_TYPE_DOUBLE: int = 2
+EDGE_TYPE_TRIPLET: int = 3
+
+EDGE_TYPE_LABELS: dict[int, str] = {
+    EDGE_TYPE_DIRECT: "direct",
+    EDGE_TYPE_DOUBLE: "double",
+    EDGE_TYPE_TRIPLET: "triplet",
+}
+
+# (scaling_factor, edge_type) — checked in order; direct is first so it
+# wins whenever the raw BPMs already match.
+_TEMPO_FACTORS: list[tuple[float, int]] = [
+    (1.0, EDGE_TYPE_DIRECT),
+    (2.0, EDGE_TYPE_DOUBLE),
+    (0.5, EDGE_TYPE_DOUBLE),
+    (1.5, EDGE_TYPE_TRIPLET),
+    (0.75, EDGE_TYPE_TRIPLET),
+]
+
+DEFAULT_TYPE_PENALTIES: dict[str, float] = {
+    "double": 0.0,
+    "triplet": 0.0,
+}
+
+
+def batch_tempo_penalty_matrix_multi(
+    bpms: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Vectorised NxN tempo penalty matrix considering direct, double-tempo,
+    and triplet tempo relationships.
+
+    For each pair the function tries every scaling factor and keeps the
+    one that yields the lowest penalty (i.e. the best-matching tempo
+    relationship).
+
+    Returns:
+        (penalty_matrix, edge_type_matrix) where:
+          - penalty_matrix: (N, N) float — tempo penalty for the
+            best-matching relationship.  ``np.inf`` if no relationship
+            is within the 8 % threshold.
+          - edge_type_matrix: (N, N) int8 — relationship type
+            (0 = none, 1 = direct, 2 = double, 3 = triplet).
+    """
+    n = len(bpms)
+    bpm_col = bpms[:, np.newaxis]  # (N, 1)
+    bpm_row = bpms[np.newaxis, :]  # (1, N)
+
+    best_penalty = np.full((n, n), np.inf)
+    edge_types = np.zeros((n, n), dtype=np.int8)
+
+    for factor, type_id in _TEMPO_FACTORS:
+        scaled = factor * bpm_row
+        diff = np.abs(bpm_col - scaled)
+        min_bpm = np.minimum(bpm_col, scaled)
+        safe_min = np.where(min_bpm > 0, min_bpm, 1.0)
+        pct_diff = (diff / safe_min) * 100.0
+        penalty = pct_diff / _MAX_BPM_DIFF_PERCENT
+        mixable = (pct_diff <= _MAX_BPM_DIFF_PERCENT) & (bpm_col > 0) & (scaled > 0)
+
+        update = mixable & (penalty < best_penalty)
+        best_penalty = np.where(update, penalty, best_penalty)
+        edge_types = np.where(update, type_id, edge_types)
+
+    return best_penalty, edge_types
+
+
+def _cross_tempo_penalty_multi(
+    new_bpms: np.ndarray,
+    old_bpms: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Cross-matrix variant of :func:`batch_tempo_penalty_matrix_multi`
+    for (n_new, n_old) pairs.
+    """
+    new_col = new_bpms[:, np.newaxis]
+    old_row = old_bpms[np.newaxis, :]
+
+    best_penalty = np.full((len(new_bpms), len(old_bpms)), np.inf)
+    edge_types = np.zeros((len(new_bpms), len(old_bpms)), dtype=np.int8)
+
+    for factor, type_id in _TEMPO_FACTORS:
+        scaled = factor * old_row
+        diff = np.abs(new_col - scaled)
+        min_bpm = np.minimum(new_col, scaled)
+        safe_min = np.where(min_bpm > 0, min_bpm, 1.0)
+        pct_diff = (diff / safe_min) * 100.0
+        penalty = pct_diff / _MAX_BPM_DIFF_PERCENT
+        mixable = (pct_diff <= _MAX_BPM_DIFF_PERCENT) & (new_col > 0) & (scaled > 0)
+
+        update = mixable & (penalty < best_penalty)
+        best_penalty = np.where(update, penalty, best_penalty)
+        edge_types = np.where(update, type_id, edge_types)
+
+    return best_penalty, edge_types
+
+
+def batch_calculate_weights_multi(
+    songs: list[Song],
+    *,
+    weights: dict[str, float] | None = None,
+    type_penalties: dict[str, float] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Like :func:`batch_calculate_weights` but produces edges for direct,
+    double-tempo and triplet relationships.
+
+    Returns:
+        (weight_matrix, finite_mask, edge_type_matrix).
+    """
+    w = weights or DEFAULT_WEIGHTS
+    tp = type_penalties or DEFAULT_TYPE_PENALTIES
+    n = len(songs)
+
+    if n == 0:
+        empty = np.empty((0, 0), dtype=np.float32)
+        return empty, np.empty((0, 0), dtype=bool), np.empty((0, 0), dtype=np.int8)
+
+    bpms = np.array([s.bpm for s in songs], dtype=np.float64)
+    keys = [s.key for s in songs]
+    embeddings = np.array([s.embedding for s in songs], dtype=np.float32)
+
+    # --- Tempo (multi-type) ---
+    tempo_mat, edge_types = batch_tempo_penalty_matrix_multi(bpms)
+    finite_mask = np.isfinite(tempo_mat)
+    finite_mask[np.tril_indices(n)] = False
+
+    # --- Harmonic ---
+    harmonic_mat = batch_harmonic_distance_matrix(keys)
+
+    # --- Semantic ---
+    semantic_mat = batch_semantic_distance_matrix(embeddings)
+
+    # --- Composite weighted sum ---
+    weight_matrix = (
+        w["harmonic"] * harmonic_mat
+        + w["tempo"] * tempo_mat
+        + w["semantic"] * semantic_mat
+    )
+
+    # --- Type-specific additive penalties ---
+    type_penalty_mat = np.where(
+        edge_types == EDGE_TYPE_DOUBLE, tp.get("double", 0.0),
+        np.where(edge_types == EDGE_TYPE_TRIPLET, tp.get("triplet", 0.0), 0.0),
+    )
+    weight_matrix = weight_matrix + type_penalty_mat
+
+    # Force non-finite entries to inf
+    weight_matrix = np.where(finite_mask, weight_matrix, np.inf)
+
+    return weight_matrix.astype(np.float32), finite_mask, edge_types
+
+
+def batch_calculate_weights_incremental_multi(
+    new_songs: list[Song],
+    existing_songs: list[Song],
+    *,
+    weights: dict[str, float] | None = None,
+    type_penalties: dict[str, float] | None = None,
+) -> tuple[
+    list[tuple[int, int]], list[float], list[str],
+    list[tuple[int, int]], list[float], list[str],
+]:
+    """
+    Like :func:`batch_calculate_weights_incremental` but produces
+    multi-type edges and returns edge-type labels.
+
+    Returns:
+        (cross_edges, cross_weights, cross_types,
+         internal_edges, internal_weights, internal_types)
+    """
+    w = weights or DEFAULT_WEIGHTS
+    tp = type_penalties or DEFAULT_TYPE_PENALTIES
+    n_new = len(new_songs)
+    n_old = len(existing_songs)
+
+    if n_new == 0:
+        return [], [], [], [], [], []
+
+    new_bpms = np.array([s.bpm for s in new_songs], dtype=np.float64)
+    new_keys = [s.key for s in new_songs]
+    new_embs = np.array([s.embedding for s in new_songs], dtype=np.float32)
+
+    cross_edges: list[tuple[int, int]] = []
+    cross_weights: list[float] = []
+    cross_types: list[str] = []
+
+    # --- Cross edges: new × existing ---
+    if n_old > 0:
+        old_bpms = np.array([s.bpm for s in existing_songs], dtype=np.float64)
+        old_keys = [s.key for s in existing_songs]
+        old_embs = np.array([s.embedding for s in existing_songs], dtype=np.float32)
+
+        # Tempo (multi-type)
+        tempo_mat, type_mat = _cross_tempo_penalty_multi(new_bpms, old_bpms)
+        finite_mask = np.isfinite(tempo_mat)
+
+        # Harmonic
+        new_pos = np.array([_key_to_fifths_position(k) for k in new_keys])
+        old_pos = np.array([_key_to_fifths_position(k) for k in old_keys])
+        raw = np.abs(new_pos[:, np.newaxis] - old_pos[np.newaxis, :])
+        harmonic_mat = np.minimum(raw, 12 - raw) / 6.0
+
+        # Semantic
+        new_norms = np.linalg.norm(new_embs, axis=1, keepdims=True)
+        old_norms = np.linalg.norm(old_embs, axis=1, keepdims=True)
+        safe_new = np.where(new_norms == 0, 1.0, new_norms)
+        safe_old = np.where(old_norms == 0, 1.0, old_norms)
+        normed_new = new_embs / safe_new
+        normed_old = old_embs / safe_old
+        sim_mat = normed_new @ normed_old.T
+        semantic_mat = np.clip((1.0 - sim_mat) / 2.0, 0.0, 1.0)
+
+        weight_mat = (
+            w["harmonic"] * harmonic_mat
+            + w["tempo"] * tempo_mat
+            + w["semantic"] * semantic_mat
+        )
+
+        # Type penalties
+        type_penalty_mat = np.where(
+            type_mat == EDGE_TYPE_DOUBLE, tp.get("double", 0.0),
+            np.where(type_mat == EDGE_TYPE_TRIPLET, tp.get("triplet", 0.0), 0.0),
+        )
+        weight_mat = weight_mat + type_penalty_mat
+
+        rows, cols = np.where(finite_mask)
+        cross_edges = list(zip(rows.tolist(), cols.tolist()))
+        cross_weights = weight_mat[rows, cols].tolist()
+        cross_types = [
+            EDGE_TYPE_LABELS.get(int(type_mat[r, c]), "direct")
+            for r, c in cross_edges
+        ]
+
+    # --- Internal edges: new × new (upper triangle) ---
+    internal_edges: list[tuple[int, int]] = []
+    internal_weights: list[float] = []
+    internal_types: list[str] = []
+
+    if n_new >= 2:
+        int_weight_mat, int_finite, int_type_mat = batch_calculate_weights_multi(
+            new_songs, weights=weights, type_penalties=type_penalties,
+        )
+        rows, cols = np.where(int_finite)
+        internal_edges = list(zip(rows.tolist(), cols.tolist()))
+        internal_weights = int_weight_mat[rows, cols].tolist()
+        internal_types = [
+            EDGE_TYPE_LABELS.get(int(int_type_mat[r, c]), "direct")
+            for r, c in internal_edges
+        ]
+
+    return cross_edges, cross_weights, cross_types, internal_edges, internal_weights, internal_types

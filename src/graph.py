@@ -42,7 +42,11 @@ from pathlib import Path
 import igraph
 import numpy as np
 
-from src.metrics import batch_calculate_weights, batch_calculate_weights_incremental
+from src.metrics import (
+    EDGE_TYPE_LABELS,
+    batch_calculate_weights_incremental_multi,
+    batch_calculate_weights_multi,
+)
 from src.models import Song
 
 logger = logging.getLogger(__name__)
@@ -83,6 +87,7 @@ class DJGraph:
         songs: list[Song],
         *,
         weights: dict[str, float] | None = None,
+        type_penalties: dict[str, float] | None = None,
     ) -> DJGraph:
         """
         Factory that creates a fully-wired DJGraph from a list of songs.
@@ -93,21 +98,25 @@ class DJGraph:
         the weight.  Infinite-cost pairs are skipped — they simply
         have no connecting edge.
 
+        Edges are classified as ``direct``, ``double`` (2× / 0.5×
+        tempo), or ``triplet`` (3/2× / 3/4× tempo).
+
         Complexity: O(n²) edge evaluations for n songs.  This is
         inherent to building a dense graph; for very large libraries
         a k-nearest-neighbours pre-filter could reduce this.
 
         Args:
-            songs:   List of Song objects to become nodes.
-            weights: Optional metric blending coefficients forwarded
-                     to calculate_weight().
+            songs:          List of Song objects to become nodes.
+            weights:        Optional metric blending coefficients.
+            type_penalties: Optional additive penalties for double /
+                            triplet edges.
 
         Returns:
             A fully constructed DJGraph instance.
         """
         instance = cls()
         instance._add_songs(songs)
-        instance._add_edges(weights=weights)
+        instance._add_edges(weights=weights, type_penalties=type_penalties)
         instance.compute_layout()
         return instance
 
@@ -131,15 +140,18 @@ class DJGraph:
         self._sorted_songs_cache = None  # invalidate cache
         logger.info("Added %d node(s) to the graph.", n)
 
-    def _add_edges(self, *, weights: dict[str, float] | None = None) -> None:
+    def _add_edges(
+        self,
+        *,
+        weights: dict[str, float] | None = None,
+        type_penalties: dict[str, float] | None = None,
+    ) -> None:
         """
         Evaluate every unordered song pair and add finite-cost edges.
 
-        Uses vectorised numpy operations (batch_calculate_weights) to
-        compute the full N×N weight matrix in bulk, replacing the O(n²)
-        Python loop with BLAS-backed matrix multiplication and numpy
-        broadcasting.  This yields ~50-100× speedup for libraries of
-        500+ songs.
+        Uses vectorised numpy operations to compute the full N×N weight
+        matrix in bulk.  Edges are classified as direct, double-tempo,
+        or triplet based on the best-matching tempo relationship.
         """
         songs = list(self._songs.values())
         n = len(songs)
@@ -148,8 +160,10 @@ class DJGraph:
             logger.info("Added 0 edge(s) to the graph (fewer than 2 songs).")
             return
 
-        # Compute the full weight matrix in one vectorised pass
-        weight_matrix, finite_mask = batch_calculate_weights(songs, weights=weights)
+        # Compute the full weight matrix with multi-type tempo matching
+        weight_matrix, finite_mask, edge_type_matrix = batch_calculate_weights_multi(
+            songs, weights=weights, type_penalties=type_penalties,
+        )
 
         # Extract (row, col) indices of finite-weight pairs
         src_indices, dst_indices = np.where(finite_mask)
@@ -158,19 +172,46 @@ class DJGraph:
         skipped = n * (n - 1) // 2 - edge_count
 
         if edge_count > 0:
-            # Build edge list using igraph vertex indices (which match
-            # the insertion order from _add_songs)
             edge_list = list(zip(src_indices.tolist(), dst_indices.tolist()))
             weight_list = weight_matrix[src_indices, dst_indices].tolist()
+            type_list = [
+                EDGE_TYPE_LABELS.get(int(edge_type_matrix[s, d]), "direct")
+                for s, d in edge_list
+            ]
 
             self.graph.add_edges(edge_list)
             self.graph.es["weight"] = weight_list
+            self.graph.es["edge_type"] = type_list
+
+        # Count by type for logging
+        type_counts: dict[str, int] = {}
+        if edge_count > 0:
+            for t in type_list:
+                type_counts[t] = type_counts.get(t, 0) + 1
 
         logger.info(
-            "Added %d edge(s) to the graph (%d unmixable pair(s) skipped).",
+            "Added %d edge(s) to the graph (%d direct, %d double, %d triplet; "
+            "%d unmixable pair(s) skipped).",
             edge_count,
+            type_counts.get("direct", 0),
+            type_counts.get("double", 0),
+            type_counts.get("triplet", 0),
             skipped,
         )
+
+    def recalculate_edges(
+        self,
+        *,
+        weights: dict[str, float] | None = None,
+        type_penalties: dict[str, float] | None = None,
+    ) -> None:
+        """
+        Delete all existing edges and recompute them from cached song
+        data using the given weight settings.  Layout is preserved.
+        """
+        if self.graph.ecount() > 0:
+            self.graph.delete_edges(range(self.graph.ecount()))
+        self._add_edges(weights=weights, type_penalties=type_penalties)
 
     # ------------------------------------------------------------------
     # Incremental updates
@@ -186,6 +227,7 @@ class DJGraph:
         new_songs: list[Song],
         *,
         weights: dict[str, float] | None = None,
+        type_penalties: dict[str, float] | None = None,
     ) -> None:
         """
         Add new songs to an existing graph, computing only the edges
@@ -217,33 +259,39 @@ class DJGraph:
             self._songs[song.file_path] = song
             self._filename_index[song.filename] = song
 
-        # Compute edges incrementally
-        cross_edges, cross_weights, int_edges, int_weights = (
-            batch_calculate_weights_incremental(
-                new_songs, existing_songs, weights=weights,
+        # Compute edges incrementally (multi-type)
+        cross_edges, cross_weights, cross_types, int_edges, int_weights, int_types = (
+            batch_calculate_weights_incremental_multi(
+                new_songs, existing_songs,
+                weights=weights,
+                type_penalties=type_penalties,
             )
         )
 
         # Translate local indices to igraph vertex indices
         edge_list: list[tuple[int, int]] = []
         weight_list: list[float] = []
+        type_list: list[str] = []
 
         # Cross edges: (new_local_idx, existing_local_idx) → (igraph_idx, igraph_idx)
         existing_v_indices = [old_vertex_indices[s.file_path] for s in existing_songs] if n_old > 0 else []
         for new_local, old_local in cross_edges:
             edge_list.append((first_new_idx + new_local, existing_v_indices[old_local]))
         weight_list.extend(cross_weights)
+        type_list.extend(cross_types)
 
         # Internal edges: (new_local_i, new_local_j)
         for ni, nj in int_edges:
             edge_list.append((first_new_idx + ni, first_new_idx + nj))
         weight_list.extend(int_weights)
+        type_list.extend(int_types)
 
         if edge_list:
             existing_edge_count = self.graph.ecount()
             self.graph.add_edges(edge_list)
             for i, w in enumerate(weight_list):
                 self.graph.es[existing_edge_count + i]["weight"] = w
+                self.graph.es[existing_edge_count + i]["edge_type"] = type_list[i]
 
         self._sorted_songs_cache = None
         self.compute_layout()
@@ -331,7 +379,7 @@ class DJGraph:
         fr_defaults = {
             "niter": 2000,
             "start_temp": 100,
-            "weights": self.graph.es["weight"],
+            "weights": self.graph.es["weight"] if self.graph.ecount() > 0 else None,
         }
 
         if algorithm == "fruchterman_reingold":
@@ -381,12 +429,14 @@ class DJGraph:
                 "content_hash": song.content_hash,
             })
 
+        has_edge_type = "edge_type" in self.graph.es.attributes() if self.graph.ecount() > 0 else False
         edges_data = []
         for edge in self.graph.es:
             edges_data.append({
                 "source": self.graph.vs[edge.source]["name"],
                 "target": self.graph.vs[edge.target]["name"],
                 "weight": edge["weight"],
+                "edge_type": edge["edge_type"] if has_edge_type else "direct",
             })
 
         layout_data = {k: list(v) for k, v in self.layout_coords.items()}
@@ -448,8 +498,10 @@ class DJGraph:
         if raw["edges"]:
             edge_list = [(e["source"], e["target"]) for e in raw["edges"]]
             weight_list = [e["weight"] for e in raw["edges"]]
+            type_list = [e.get("edge_type", "direct") for e in raw["edges"]]
             instance.graph.add_edges(edge_list)
             instance.graph.es["weight"] = weight_list
+            instance.graph.es["edge_type"] = type_list
 
         # Restore layout if present, otherwise compute it.
         if "layout" in raw and raw["layout"]:
@@ -489,12 +541,14 @@ class DJGraph:
                 "content_hash": song.content_hash,
             })
 
+        has_edge_type = "edge_type" in self.graph.es.attributes() if self.graph.ecount() > 0 else False
         edges_data = []
         for edge in self.graph.es:
             edges_data.append({
                 "source": self.graph.vs[edge.source]["name"],
                 "target": self.graph.vs[edge.target]["name"],
                 "weight": edge["weight"],
+                "edge_type": edge["edge_type"] if has_edge_type else "direct",
             })
 
         layout_data = {k: v for k, v in self.layout_coords.items()}
@@ -546,8 +600,10 @@ class DJGraph:
         if raw["edges"]:
             edge_list = [(e["source"], e["target"]) for e in raw["edges"]]
             weight_list = [e["weight"] for e in raw["edges"]]
+            type_list = [e.get("edge_type", "direct") for e in raw["edges"]]
             instance.graph.add_edges(edge_list)
             instance.graph.es["weight"] = weight_list
+            instance.graph.es["edge_type"] = type_list
 
         if "layout" in raw and raw["layout"]:
             instance._layout = {k: tuple(v) for k, v in raw["layout"].items()}
@@ -592,19 +648,20 @@ class DJGraph:
         self,
         source_id: str,
         target_id: str,
+        *,
+        allowed_types: set[str] | None = None,
     ) -> tuple[list[Song], float]:
         """
         Find the lowest-cost sequence of transitions from source to target
         using Dijkstra's algorithm.
 
-        Dijkstra's algorithm is the right choice here because:
-          - All edge weights are non-negative (costs are in [0, 1]).
-          - We want the single-source shortest path, not all-pairs.
-          - igraph's C-based implementation is highly optimised.
-
         Args:
-            source_id: file_path or filename of the starting track.
-            target_id: file_path or filename of the destination track.
+            source_id:     file_path or filename of the starting track.
+            target_id:     file_path or filename of the destination track.
+            allowed_types: If given, only traverse edges whose
+                           ``edge_type`` is in this set (e.g.
+                           ``{"direct", "double"}``).  Excluded edges
+                           are treated as infinite cost.
 
         Returns:
             A tuple of (path, total_cost) where:
@@ -632,10 +689,22 @@ class DJGraph:
                 f"No path between '{source.filename}' and '{target.filename}'"
             )
 
+        # Build weight list, masking out excluded edge types
+        has_edge_type = "edge_type" in self.graph.es.attributes()
+        if allowed_types is not None and has_edge_type:
+            edge_weights = [
+                e["weight"]
+                if (e["edge_type"] or "direct") in allowed_types
+                else float("inf")
+                for e in self.graph.es
+            ]
+        else:
+            edge_weights = "weight"
+
         paths = self.graph.get_shortest_paths(
             src_v.index,
             to=tgt_v.index,
-            weights="weight",
+            weights=edge_weights,
             output="vpath",
         )
 
@@ -689,18 +758,43 @@ class DJGraph:
             return float("inf")
         return self.graph.es[eid]["weight"]
 
-    def neighbours(self, song_id: str) -> list[tuple[Song, float]]:
+    def edge_info(self, source_id: str, target_id: str) -> tuple[float, str]:
+        """Return ``(weight, edge_type)`` for an edge, or ``(inf, "")``."""
+        src = self.get_song(source_id)
+        dst = self.get_song(target_id)
+        src_v = self.graph.vs.find(name=src.file_path)
+        dst_v = self.graph.vs.find(name=dst.file_path)
+        eid = self.graph.get_eid(src_v.index, dst_v.index, error=False)
+        if eid < 0:
+            return float("inf"), ""
+        edge = self.graph.es[eid]
+        has_et = "edge_type" in self.graph.es.attributes()
+        etype = (edge["edge_type"] or "direct") if has_et else "direct"
+        return edge["weight"], etype
+
+    def neighbours(
+        self,
+        song_id: str,
+        *,
+        allowed_types: set[str] | None = None,
+    ) -> list[tuple[Song, float, str]]:
         """
         Return all songs reachable in one hop from the given song,
         sorted by transition cost (cheapest first).
+
+        Each element is ``(Song, cost, edge_type)``.
         """
         song = self.get_song(song_id)
         v = self.graph.vs.find(name=song.file_path)
-        result = []
+        has_edge_type = "edge_type" in self.graph.es.attributes() if self.graph.ecount() > 0 else False
+        result: list[tuple[Song, float, str]] = []
         for eid in self.graph.incident(v, mode="all"):
             edge = self.graph.es[eid]
+            etype = (edge["edge_type"] or "direct") if has_edge_type else "direct"
+            if allowed_types is not None and etype not in allowed_types:
+                continue
             # In an undirected graph, pick the *other* endpoint
             other_idx = edge.target if edge.source == v.index else edge.source
             other_v = self.graph.vs[other_idx]
-            result.append((self._songs[other_v["name"]], edge["weight"]))
+            result.append((self._songs[other_v["name"]], edge["weight"], etype))
         return sorted(result, key=lambda x: x[1])

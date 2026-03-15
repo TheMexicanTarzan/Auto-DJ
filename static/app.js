@@ -5,42 +5,75 @@
  *   - Progress polling during graph load
  *   - Graph loading into graphology + Sigma.js WebGL renderer
  *   - Song search / autocomplete for pathfinding
- *   - Path highlighting (nodes + edges)
- *   - Node click inspection (top-5 neighbours)
+ *   - Path highlighting (nodes + edges) with edge-type coloring
+ *   - Node click inspection (top-K neighbours)
+ *   - Tempo-relationship checkboxes for pathfinding / neighbor filtering
+ *   - Weight tuning with server-side recalculation
  */
 
 /* global graphology, Sigma */
 
 // =========================================================================
+// Edge type color palette
+// =========================================================================
+
+var EDGE_COLORS = {
+  direct:  { path: "#e53e3e", hover: "#718096" },
+  double:  { path: "#48bb78", hover: "#276749" },
+  triplet: { path: "#4299e1", hover: "#2b6cb0" },
+};
+
+function edgePathColor(edgeType) {
+  return (EDGE_COLORS[edgeType] || EDGE_COLORS.direct).path;
+}
+function edgeHoverColor(edgeType) {
+  return (EDGE_COLORS[edgeType] || EDGE_COLORS.direct).hover;
+}
+
+// =========================================================================
 // State
 // =========================================================================
 
-let sigmaInstance = null;
-let graphInstance = null;
-let songList = [];          // [{id, label}]
+var sigmaInstance = null;
+var graphInstance = null;
+var songList = [];          // [{id, label}]
 
 // Selections
-let startId = null;
-let endId = null;
+var startId = null;
+var endId = null;
 
 // Rendering state — sets checked by reducers
-const highlightedNodes = new Set();
-const highlightedEdges = new Set();
-let hoveredNode = null;
-let hoveredNeighbors = new Set();   // cached neighbor node IDs for hovered node
-let hoveredEdgeKeys = new Set();    // cached edge keys for hovered node
+var highlightedNodes = new Set();
+var highlightedEdges = new Set();
+var hoveredNode = null;
+var hoveredNeighbors = new Set();
+var hoveredEdgeKeys = new Set();
+var detailNode = null;        // node selected via details/click
+
+// =========================================================================
+// Helpers
+// =========================================================================
+
+/** Read the tempo-type checkboxes and return an array of allowed types. */
+function getAllowedTypes() {
+  var types = [];
+  if (document.getElementById("filter-direct").checked)  types.push("direct");
+  if (document.getElementById("filter-double").checked)  types.push("double");
+  if (document.getElementById("filter-triplet").checked) types.push("triplet");
+  return types;
+}
 
 // =========================================================================
 // 1. Progress polling
 // =========================================================================
 
-const loadingOverlay = document.getElementById("loading-overlay");
-const mainContent = document.getElementById("main-content");
-const progressBar = document.getElementById("progress-bar");
-const progressText = document.getElementById("progress-text");
-const headerStats = document.getElementById("header-stats");
+var loadingOverlay = document.getElementById("loading-overlay");
+var mainContent = document.getElementById("main-content");
+var progressBar = document.getElementById("progress-bar");
+var progressText = document.getElementById("progress-text");
+var headerStats = document.getElementById("header-stats");
 
-let pollTimer = null;
+var pollTimer = null;
 
 function startPolling() {
   pollTimer = setInterval(pollStatus, 1000);
@@ -48,8 +81,8 @@ function startPolling() {
 
 async function pollStatus() {
   try {
-    const resp = await fetch("/api/status");
-    const data = await resp.json();
+    var resp = await fetch("/api/status");
+    var data = await resp.json();
 
     progressBar.style.width = data.progress + "%";
 
@@ -90,18 +123,23 @@ async function pollStatus() {
 // 2. Graph loading
 // =========================================================================
 
-async function loadGraph() {
-  progressText.textContent = "Loading graph data...";
+function updateHeaderStats(graphData) {
+  var counts = graphData.edge_type_counts || {};
+  var parts = [graphData.num_nodes + " tracks"];
+  var edgeParts = [];
+  if (counts.direct)  edgeParts.push(counts.direct + " direct");
+  if (counts.double)  edgeParts.push(counts.double + " double");
+  if (counts.triplet) edgeParts.push(counts.triplet + " triplet");
+  if (edgeParts.length > 0) {
+    parts.push(edgeParts.join(" + ") + " transitions (" + graphData.num_edges + " total)");
+  } else {
+    parts.push(graphData.num_edges + " transitions");
+  }
+  headerStats.textContent = parts.join(" | ");
+}
 
-  const [graphResp, songsResp] = await Promise.all([
-    fetch("/api/graph"),
-    fetch("/api/songs"),
-  ]);
-  const graphData = await graphResp.json();
-  songList = await songsResp.json();
-
-  // Build graphology instance
-  const graph = new graphology.Graph({ multi: false, type: "undirected" });
+function buildGraphology(graphData) {
+  var graph = new graphology.Graph({ multi: false, type: "undirected" });
 
   graphData.nodes.forEach(function (n) {
     graph.addNode(n.id, {
@@ -116,24 +154,36 @@ async function loadGraph() {
   });
 
   graphData.edges.forEach(function (e) {
-    // Avoid duplicate edges
     if (!graph.hasEdge(e.source, e.target)) {
+      var etype = e.edge_type || "direct";
       graph.addEdge(e.source, e.target, {
         weight: e.weight,
-        color: "#cbd5e0",
+        edge_type: etype,
+        color: edgePathColor(etype),
       });
     }
   });
 
-  graphInstance = graph;
+  return graph;
+}
+
+async function loadGraph() {
+  progressText.textContent = "Loading graph data...";
+
+  var graphResp = await fetch("/api/graph");
+  var songsResp = await fetch("/api/songs");
+  var graphData = await graphResp.json();
+  songList = await songsResp.json();
+
+  graphInstance = buildGraphology(graphData);
 
   // Switch views BEFORE creating Sigma so the container has dimensions
   loadingOverlay.style.display = "none";
   mainContent.classList.add("visible");
 
   // Instantiate Sigma renderer
-  const container = document.getElementById("sigma-container");
-  sigmaInstance = new Sigma(graph, container, {
+  var container = document.getElementById("sigma-container");
+  sigmaInstance = new Sigma(graphInstance, container, {
     renderEdgeLabels: false,
     enableEdgeEvents: false,
     defaultNodeColor: "#6c7a89",
@@ -142,6 +192,7 @@ async function loadGraph() {
     labelFont: "Segoe UI, Roboto, sans-serif",
     labelSize: 12,
     labelRenderedSizeThreshold: 14,
+    zIndex: true,
     // --- Reducers for selective rendering ---
     nodeReducer: nodeReducer,
     edgeReducer: edgeReducer,
@@ -153,12 +204,50 @@ async function loadGraph() {
   sigmaInstance.on("clickNode", onClickNode);
 
   // Update header stats
-  headerStats.textContent =
-    graphData.num_nodes + " tracks loaded | " +
-    graphData.num_edges + " possible transitions";
+  updateHeaderStats(graphData);
 
   // Populate search inputs
   populateSearch();
+}
+
+/** Reload graph data from server (after recalculate) without full page reload. */
+async function reloadGraphData() {
+  var graphResp = await fetch("/api/graph");
+  var graphData = await graphResp.json();
+
+  // Clear old state
+  highlightedNodes.clear();
+  highlightedEdges.clear();
+  hoveredNode = null;
+  hoveredNeighbors.clear();
+  hoveredEdgeKeys.clear();
+  detailNode = null;
+
+  // Rebuild graphology keeping existing positions
+  graphInstance.clear();
+  graphData.nodes.forEach(function (n) {
+    graphInstance.addNode(n.id, {
+      x: n.x, y: n.y,
+      label: n.label,
+      size: 2,
+      color: "#6c7a89",
+      bpm: n.bpm,
+      key: n.key,
+    });
+  });
+  graphData.edges.forEach(function (e) {
+    if (!graphInstance.hasEdge(e.source, e.target)) {
+      var etype = e.edge_type || "direct";
+      graphInstance.addEdge(e.source, e.target, {
+        weight: e.weight,
+        edge_type: etype,
+        color: edgePathColor(etype),
+      });
+    }
+  });
+
+  sigmaInstance.refresh();
+  updateHeaderStats(graphData);
 }
 
 // =========================================================================
@@ -182,6 +271,14 @@ function nodeReducer(node, data) {
     }
   }
 
+  // Detail-selected node
+  if (detailNode !== null && node === detailNode) {
+    res.color = "#f6ad55";
+    res.size = 4;
+    res.zIndex = 2;
+    res.label = data.label;
+  }
+
   if (hoveredNode !== null) {
     if (node === hoveredNode) {
       res.color = "#fc8181";
@@ -201,23 +298,24 @@ function nodeReducer(node, data) {
 
 function edgeReducer(edge, data) {
   var res = Object.assign({}, data);
+  var etype = data.edge_type || "direct";
 
   // Default: hide all edges for performance
   res.hidden = true;
 
-  // Show highlighted (path) edges
+  // Show highlighted (path) edges — colored by edge type
   if (highlightedEdges.has(edge)) {
     res.hidden = false;
-    res.color = "#e53e3e";
+    res.color = edgePathColor(etype);
     res.size = 1.5;
     res.zIndex = 2;
   }
 
-  // Show edges of hovered node
+  // Show edges of hovered node — muted type colors
   if (hoveredNode !== null && hoveredEdgeKeys.has(edge)) {
     res.hidden = false;
     if (!highlightedEdges.has(edge)) {
-      res.color = "#718096";
+      res.color = edgeHoverColor(etype);
       res.size = 0.5;
     }
   }
@@ -248,13 +346,21 @@ async function onClickNode(event) {
 }
 
 async function loadNodeDetails(nodeId) {
+  // Track detail-selected node for z-index
+  detailNode = nodeId;
+  if (sigmaInstance) sigmaInstance.refresh({ skipIndexation: true });
+
   var detailsEl = document.getElementById("node-details");
   detailsEl.textContent = "Loading...";
 
   var k = parseInt(document.getElementById("top-k-input").value, 10) || 10;
+  var types = getAllowedTypes();
+  var typesParam = types.length < 3 ? "&types=" + types.join(",") : "";
 
   try {
-    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId) + "?k=" + k);
+    var resp = await fetch(
+      "/api/neighbors/" + encodeURIComponent(nodeId) + "?k=" + k + typesParam
+    );
     var data = await resp.json();
 
     if (data.error) {
@@ -275,8 +381,10 @@ async function loadNodeDetails(nodeId) {
       lines.push("  (no compatible neighbours)");
     } else {
       data.neighbors.forEach(function (nbr, i) {
+        var typeTag = nbr.edge_type && nbr.edge_type !== "direct"
+          ? " [" + nbr.edge_type + "]" : "";
         lines.push(
-          "  " + (i + 1) + ". " + nbr.label +
+          "  " + (i + 1) + ". " + nbr.label + typeTag +
           "\n     BPM: " + nbr.bpm + " | Key: " + nbr.key +
           "\n     Transition cost: " + nbr.cost.toFixed(4)
         );
@@ -409,10 +517,15 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
   outputEl.textContent = "Finding path...";
 
   try {
+    var allowedTypes = getAllowedTypes();
     var resp = await fetch("/api/path", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ start: startId, end: endId }),
+      body: JSON.stringify({
+        start: startId,
+        end: endId,
+        allowed_types: allowedTypes.length < 3 ? allowedTypes : null,
+      }),
     });
     var result = await resp.json();
 
@@ -458,11 +571,52 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
 function clearHighlights() {
   highlightedNodes.clear();
   highlightedEdges.clear();
+  detailNode = null;
   if (sigmaInstance) sigmaInstance.refresh();
 }
 
 // =========================================================================
-// 7. Bootstrap
+// 7. Recalculate edges
+// =========================================================================
+
+document.getElementById("recalculate-btn").addEventListener("click", async function () {
+  var btn = document.getElementById("recalculate-btn");
+  var statusEl = document.getElementById("recalculate-status");
+  btn.disabled = true;
+  statusEl.textContent = "Recalculating...";
+
+  try {
+    var resp = await fetch("/api/recalculate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        harmonic: parseFloat(document.getElementById("w-harmonic").value) || 0.35,
+        tempo:    parseFloat(document.getElementById("w-tempo").value)    || 0.25,
+        semantic: parseFloat(document.getElementById("w-semantic").value) || 0.40,
+        double_penalty:  parseFloat(document.getElementById("w-double").value)  || 0.0,
+        triplet_penalty: parseFloat(document.getElementById("w-triplet").value) || 0.0,
+      }),
+    });
+    var result = await resp.json();
+
+    if (result.error) {
+      statusEl.textContent = "Error: " + result.error;
+      return;
+    }
+
+    statusEl.textContent = result.message + " (" + result.num_edges + " edges)";
+
+    // Reload graph to reflect new edges
+    await reloadGraphData();
+  } catch (err) {
+    statusEl.textContent = "Request failed: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// =========================================================================
+// 8. Bootstrap
 // =========================================================================
 
 startPolling();

@@ -73,9 +73,10 @@ class TestGraphBuild:
         assert g.num_edges == 1
 
     def test_unmixable_tempo_produces_no_edge(self):
-        # 100 vs 130 BPM = 30% diff — way over the 8% threshold
+        # 100 vs 130: 0.75*130=97.5 is within 8% of 100 → triplet edge.
+        # Use BPMs where no ratio (1×, 2×, 0.5×, 1.5×, 0.75×) is within 8%.
         a = _song("slow.mp3", bpm=100, key="C major", embedding=_SHARED_EMB)
-        b = _song("fast.mp3", bpm=130, key="C major", embedding=_SHARED_EMB)
+        b = _song("fast.mp3", bpm=115, key="C major", embedding=_SHARED_EMB)
         g = DJGraph.build([a, b])
 
         assert g.num_nodes == 2
@@ -162,8 +163,9 @@ class TestShortestPath:
 
     def test_no_path_raises(self):
         """Completely disconnected songs should raise NoPathError."""
+        # 80 vs 190: no ratio (1×, 2×, 0.5×, 1.5×, 0.75×) is within 8%
         a = _song("island_a.mp3", bpm=80, embedding=_SHARED_EMB)
-        b = _song("island_b.mp3", bpm=160, embedding=_SHARED_EMB)
+        b = _song("island_b.mp3", bpm=190, embedding=_SHARED_EMB)
         g = DJGraph.build([a, b])
 
         with pytest.raises(NoPathError):
@@ -245,7 +247,7 @@ class TestEdgeWeight:
 
     def test_missing_edge_returns_inf(self):
         a = _song("s.mp3", bpm=80, embedding=_SHARED_EMB)
-        b = _song("t.mp3", bpm=160, embedding=_SHARED_EMB)
+        b = _song("t.mp3", bpm=190, embedding=_SHARED_EMB)
         g = DJGraph.build([a, b])
         assert math.isinf(g.edge_weight("s.mp3", "t.mp3"))
 
@@ -354,7 +356,7 @@ class TestSerialization:
     def test_disconnected_songs_round_trip(self, tmp_path):
         """Songs with no edges (incompatible BPM) survive serialization."""
         a = _song("slow.mp3", bpm=80, key="C major", embedding=_SHARED_EMB)
-        b = _song("fast.mp3", bpm=160, key="C major", embedding=_SHARED_EMB)
+        b = _song("fast.mp3", bpm=190, key="C major", embedding=_SHARED_EMB)
         g = DJGraph.build([a, b])
 
         cache_file = tmp_path / "disc_cache.json"
@@ -481,10 +483,11 @@ class TestIncrementalAdd:
         assert g.edge_weight("a.mp3", "b.mp3") < float("inf")
 
     def test_add_songs_incremental_no_edge_for_incompatible(self):
+        # 100 vs 170: no ratio (1×, 2×, 0.5×, 1.5×, 0.75×) is within 8%
         a = _song("a.mp3", bpm=100, key="C major", embedding=_SHARED_EMB, content_hash="aaa")
         g = DJGraph.build([a])
 
-        b = _song("b.mp3", bpm=150, key="C major", embedding=_SHARED_EMB, content_hash="bbb")
+        b = _song("b.mp3", bpm=170, key="C major", embedding=_SHARED_EMB, content_hash="bbb")
         g.add_songs_incremental([b])
         assert g.num_nodes == 2
         assert g.num_edges == 0

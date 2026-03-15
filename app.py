@@ -32,7 +32,6 @@ from pydantic import BaseModel
 
 from src.config import CACHE_PATH, SONGS_DIRECTORY, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
-from src.metrics import calculate_weight
 from src.utils import analyse_new_songs, discover_changes, scan_directory
 
 # ---------------------------------------------------------------------------
@@ -257,6 +256,7 @@ def api_graph():
             "key": song.key,
         })
 
+    has_edge_type = "edge_type" in graph.graph.es.attributes() if graph.graph.ecount() > 0 else False
     edges = []
     for edge in graph.graph.es:
         src_name = graph.graph.vs[edge.source]["name"]
@@ -265,13 +265,21 @@ def api_graph():
             "source": src_name,
             "target": dst_name,
             "weight": edge["weight"],
+            "edge_type": (edge["edge_type"] or "direct") if has_edge_type else "direct",
         })
+
+    # Count edges by type
+    type_counts: dict[str, int] = {}
+    for e in edges:
+        t = e.get("edge_type", "direct")
+        type_counts[t] = type_counts.get(t, 0) + 1
 
     return _orjson_response({
         "nodes": nodes,
         "edges": edges,
         "num_nodes": graph.num_nodes,
         "num_edges": graph.num_edges,
+        "edge_type_counts": type_counts,
     })
 
 
@@ -292,6 +300,7 @@ def api_songs():
 class PathRequest(BaseModel):
     start: str
     end: str
+    allowed_types: list[str] | None = None
 
 
 @app.post("/api/path")
@@ -319,8 +328,12 @@ def api_path(req: PathRequest):
             "total_cost": 0.0,
         })
 
+    allowed = set(req.allowed_types) if req.allowed_types else None
+
     try:
-        path, total_cost = graph.get_shortest_path(req.start, req.end)
+        path, total_cost = graph.get_shortest_path(
+            req.start, req.end, allowed_types=allowed,
+        )
     except NoPathError:
         return _orjson_response({
             "error": (
@@ -331,7 +344,7 @@ def api_path(req: PathRequest):
     except KeyError as exc:
         return _orjson_response({"error": f"Song not found: {exc}"}, status_code=404)
 
-    # Build text summary
+    # Build text summary using stored edge weights
     lines = ["SHORTEST MIX PATH", "=" * 40]
     path_node_ids = [s.file_path for s in path]
     path_edges = []
@@ -342,8 +355,10 @@ def api_path(req: PathRequest):
         lines.append(f"        BPM: {song.bpm}  |  Key: {song.key}")
 
         if i < len(path) - 1:
-            hop_cost = calculate_weight(song, path[i + 1])
-            lines.append(f"          -> cost: {hop_cost:.4f}")
+            hop_cost, edge_type = graph.edge_info(
+                song.file_path, path[i + 1].file_path,
+            )
+            lines.append(f"          -> cost: {hop_cost:.4f} ({edge_type})")
             path_edges.append([song.file_path, path[i + 1].file_path])
 
     lines.append("-" * 40)
@@ -358,7 +373,7 @@ def api_path(req: PathRequest):
 
 
 @app.get("/api/neighbors/{node_id:path}")
-def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K):
+def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K, types: str | None = None):
     """Return a node's metadata and its top-K nearest neighbours."""
     graph = _get_graph()
     if graph is None:
@@ -369,7 +384,8 @@ def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K):
     except KeyError:
         return _orjson_response({"error": f"Unknown node: {node_id}"}, status_code=404)
 
-    neighbours = graph.neighbours(node_id)
+    allowed_types = set(types.split(",")) if types else None
+    neighbours = graph.neighbours(node_id, allowed_types=allowed_types)
     top_k = neighbours[:max(1, min(k, 50))]
 
     return _orjson_response({
@@ -386,9 +402,47 @@ def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K):
                 "bpm": nbr.bpm,
                 "key": nbr.key,
                 "cost": round(cost, 4),
+                "edge_type": etype,
             }
-            for nbr, cost in top_k
+            for nbr, cost, etype in top_k
         ],
+    })
+
+
+class RecalculateRequest(BaseModel):
+    harmonic: float = 0.35
+    tempo: float = 0.25
+    semantic: float = 0.40
+    double_penalty: float = 0.0
+    triplet_penalty: float = 0.0
+
+
+@app.post("/api/recalculate")
+def api_recalculate(req: RecalculateRequest):
+    """Recalculate all edges using cached song data with new weights."""
+    graph = _get_graph()
+    if graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
+
+    weights = {
+        "harmonic": req.harmonic,
+        "tempo": req.tempo,
+        "semantic": req.semantic,
+    }
+    type_penalties = {
+        "double": req.double_penalty,
+        "triplet": req.triplet_penalty,
+    }
+
+    graph.recalculate_edges(weights=weights, type_penalties=type_penalties)
+
+    # Persist to cache
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    graph.save_to_pickle(CACHE_PATH)
+
+    return _orjson_response({
+        "num_edges": graph.num_edges,
+        "message": "Edges recalculated successfully.",
     })
 
 
