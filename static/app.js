@@ -53,6 +53,17 @@ var detailNode = null;        // node selected via details/click
 // Pre-computed adjacency cache: nodeId -> { neighbors: Set, edges: Set }
 var adjacencyCache = new Map();
 
+// Shared singleton returned for dimmed (non-highlighted, non-hovered) nodes
+var DIMMED_NODE = Object.freeze({
+  color: "#4a5568",
+  size: 1.5,
+  label: null,
+  zIndex: 0,
+});
+
+// requestAnimationFrame gate for hover refreshes
+var pendingRefresh = null;
+
 // =========================================================================
 // Helpers
 // =========================================================================
@@ -65,6 +76,24 @@ function buildAdjacencyCache() {
       neighbors: new Set(graphInstance.neighbors(node)),
       edges: new Set(graphInstance.edges(node)),
     });
+  });
+}
+
+/** Enable/disable zIndex sorting only when visual state requires it. */
+function syncZIndex() {
+  var needed = hoveredNode !== null || highlightedNodes.size > 0 || detailNode !== null;
+  if (sigmaInstance.getSetting("zIndex") !== needed) {
+    sigmaInstance.setSetting("zIndex", needed);
+  }
+}
+
+/** Schedule a hover refresh, coalescing multiple calls per animation frame. */
+function scheduleRefresh() {
+  if (pendingRefresh) return;
+  pendingRefresh = requestAnimationFrame(function () {
+    pendingRefresh = null;
+    syncZIndex();
+    sigmaInstance.refresh({ skipIndexation: true });
   });
 }
 
@@ -174,6 +203,7 @@ function buildGraphology(graphData) {
         weight: e.weight,
         edge_type: etype,
         color: edgePathColor(etype),
+        hidden: true,
       });
     }
   });
@@ -188,6 +218,7 @@ async function loadGraph() {
   var songsResp = await fetch("/api/songs");
   var graphData = await graphResp.json();
   songList = await songsResp.json();
+  songList.forEach(function (s) { s._lower = s.label.toLowerCase(); });
 
   graphInstance = buildGraphology(graphData);
   buildAdjacencyCache();
@@ -206,8 +237,8 @@ async function loadGraph() {
     labelColor: { color: "#e2e8f0" },
     labelFont: "Segoe UI, Roboto, sans-serif",
     labelSize: 12,
-    labelRenderedSizeThreshold: 14,
-    zIndex: true,
+    labelRenderedSizeThreshold: 100,
+    zIndex: false,
     // --- Reducers for selective rendering ---
     nodeReducer: nodeReducer,
     edgeReducer: edgeReducer,
@@ -257,6 +288,7 @@ async function reloadGraphData() {
         weight: e.weight,
         edge_type: etype,
         color: edgePathColor(etype),
+        hidden: true,
       });
     }
   });
@@ -276,49 +308,48 @@ function nodeReducer(node, data) {
     return data;
   }
 
-  // Only allocate a copy when we actually need to modify something
-  var needsCopy = highlightedNodes.size > 0
-    || (detailNode !== null && node === detailNode)
-    || node === hoveredNode
-    || hoveredNeighbors.has(node);
+  var isHovered = node === hoveredNode;
+  var isNeighbor = hoveredNeighbors.has(node);
+  var isHighlighted = highlightedNodes.has(node);
+  var isDetail = detailNode !== null && node === detailNode;
 
-  if (!needsCopy) return data;
+  // Dim path: node is not involved in any active state — return frozen singleton
+  if (highlightedNodes.size > 0 && !isHighlighted && !isHovered && !isNeighbor && !isDetail) {
+    return DIMMED_NODE;
+  }
+
+  // Only remaining: nodes that actually need modification
+  if (!isHighlighted && !isHovered && !isNeighbor && !isDetail) return data;
 
   var res = Object.assign({}, data);
 
-  if (highlightedNodes.size > 0) {
-    if (highlightedNodes.has(node)) {
-      res.color = "#e53e3e";
-      res.size = 4;
-      res.zIndex = 2;
-      res.label = data.label;
-    } else {
-      res.color = "#4a5568";
-      res.size = 1.5;
-      res.label = null;
-      res.zIndex = 0;
-    }
+  if (highlightedNodes.size > 0 && isHighlighted) {
+    res.color = "#e53e3e";
+    res.size = 4;
+    res.zIndex = 2;
+    res.label = data.label;
+    res.forceLabel = true;
   }
 
-  // Detail-selected node
-  if (detailNode !== null && node === detailNode) {
+  if (isDetail) {
     res.color = "#f6ad55";
     res.size = 4;
     res.zIndex = 2;
     res.label = data.label;
+    res.forceLabel = true;
   }
 
-  if (hoveredNode !== null) {
-    if (node === hoveredNode) {
-      res.color = "#fc8181";
-      res.size = 5;
-      res.label = data.label;
-      res.zIndex = 3;
-    } else if (hoveredNeighbors.has(node)) {
-      res.color = res.color === "#e53e3e" ? "#e53e3e" : "#a0aec0";
-      res.size = res.size > 2 ? res.size : 2.5;
-      res.label = data.label;
-    }
+  if (isHovered) {
+    res.color = "#fc8181";
+    res.size = 5;
+    res.label = data.label;
+    res.zIndex = 3;
+    res.forceLabel = true;
+  } else if (isNeighbor) {
+    res.color = res.color === "#e53e3e" ? "#e53e3e" : "#a0aec0";
+    res.size = res.size > 2 ? res.size : 2.5;
+    res.label = data.label;
+    res.forceLabel = true;
   }
 
   return res;
@@ -369,14 +400,14 @@ function onEnterNode(event) {
     hoveredNeighbors = new Set(graphInstance.neighbors(event.node));
     hoveredEdgeKeys = new Set(graphInstance.edges(event.node));
   }
-  sigmaInstance.refresh({ skipIndexation: true });
+  scheduleRefresh();
 }
 
 function onLeaveNode() {
   hoveredNode = null;
-  hoveredNeighbors.clear();
-  hoveredEdgeKeys.clear();
-  sigmaInstance.refresh({ skipIndexation: true });
+  hoveredNeighbors = new Set();
+  hoveredEdgeKeys = new Set();
+  scheduleRefresh();
 }
 
 async function onClickNode(event) {
@@ -386,7 +417,7 @@ async function onClickNode(event) {
 async function loadNodeDetails(nodeId) {
   // Track detail-selected node for z-index
   detailNode = nodeId;
-  if (sigmaInstance) sigmaInstance.refresh({ skipIndexation: true });
+  if (sigmaInstance) scheduleRefresh();
 
   var detailsEl = document.getElementById("node-details");
   detailsEl.textContent = "Loading...";
@@ -470,7 +501,7 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
       }
 
       var matches = songList.filter(function (s) {
-        return s.label.toLowerCase().indexOf(query) !== -1;
+        return s._lower.indexOf(query) !== -1;
       }).slice(0, 50);
 
       if (matches.length === 0) {
@@ -598,6 +629,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
       }
     });
 
+    syncZIndex();
     sigmaInstance.refresh();
     outputEl.textContent = result.summary;
   } catch (err) {
@@ -611,7 +643,10 @@ function clearHighlights() {
   highlightedNodes.clear();
   highlightedEdges.clear();
   detailNode = null;
-  if (sigmaInstance) sigmaInstance.refresh();
+  if (sigmaInstance) {
+    syncZIndex();
+    sigmaInstance.refresh();
+  }
 }
 
 // =========================================================================
