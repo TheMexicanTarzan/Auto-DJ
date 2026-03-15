@@ -343,13 +343,12 @@ function nodeReducer(node, data) {
     res.color = "#fc8181";
     res.size = 5;
     res.label = data.label;
+    res.labelColor = "#000000";
     res.zIndex = 3;
     res.forceLabel = true;
   } else if (isNeighbor) {
     res.color = res.color === "#e53e3e" ? "#e53e3e" : "#a0aec0";
     res.size = res.size > 2 ? res.size : 2.5;
-    res.label = data.label;
-    res.forceLabel = true;
   }
 
   return res;
