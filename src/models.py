@@ -32,6 +32,7 @@ class AudioAnalysis(NamedTuple):
     sr: int
     beat_times: list     # all detected beat times (seconds)
     downbeat_times: list # downbeat ("1") times (seconds)
+    fingerprint: str     # Chromaprint audio fingerprint
 
 # ---------------------------------------------------------------------------
 # CLAP model singleton — loaded once, shared across all Song instances.
@@ -44,13 +45,19 @@ class AudioAnalysis(NamedTuple):
 
 _clap_model = None
 _clap_processor = None
+_clap_device = None
 
 
 def _get_clap_model():
-    """Lazy-load the CLAP model and processor on first use."""
-    global _clap_model, _clap_processor
+    """Lazy-load the CLAP model and processor on first use.
+
+    When a CUDA-capable GPU is available the model is moved to it
+    automatically, giving a significant speed-up for embedding inference.
+    """
+    global _clap_model, _clap_processor, _clap_device
 
     if _clap_model is None:
+        import torch
         from transformers import ClapModel, ClapProcessor
 
         local_path = str(Path(__file__).resolve().parent / "clap")
@@ -58,6 +65,10 @@ def _get_clap_model():
         _clap_processor = ClapProcessor.from_pretrained(local_path)
         _clap_model = ClapModel.from_pretrained(local_path)
         _clap_model.eval()  # inference mode — no gradient tracking needed
+
+        _clap_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _clap_model.to(_clap_device)
+        logger.info("CLAP model loaded on device: %s", _clap_device)
 
     return _clap_model, _clap_processor
 
@@ -179,6 +190,38 @@ def _detect_beats_and_downbeats(
     return float(bpm), beat_times, []
 
 
+# ---------------------------------------------------------------------------
+# Audio fingerprinting  (Chromaprint via pyacoustid)
+# ---------------------------------------------------------------------------
+
+def _compute_fingerprint(y: np.ndarray, sr: int) -> str:
+    """
+    Compute a Chromaprint audio fingerprint from a mono waveform.
+
+    Returns the fingerprint as a compact encoded string.  Returns an
+    empty string if the Chromaprint library is unavailable so that
+    fingerprinting degrades gracefully.
+    """
+    try:
+        import chromaprint
+    except ImportError:
+        logger.warning(
+            "chromaprint not available — skipping audio fingerprinting. "
+            "Install pyacoustid and libchromaprint for deduplication support."
+        )
+        return ""
+
+    # Chromaprint expects 16-bit signed PCM at the native sample rate.
+    max_val = np.max(np.abs(y))
+    if max_val > 0:
+        pcm = (y / max_val * 32767).astype(np.int16)
+    else:
+        return ""
+
+    _, encoded = chromaprint.get_fingerprint(pcm.tobytes(), sr, 1)
+    return encoded
+
+
 def analyse_audio(path: str | Path) -> AudioAnalysis:
     """
     Load an audio file and compute BPM, key, beats, and downbeats
@@ -217,6 +260,9 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
     # Key estimation (Essentia)
     key = _estimate_key(y, sr)
 
+    # Audio fingerprint (Chromaprint)
+    fingerprint = _compute_fingerprint(y, sr)
+
     return AudioAnalysis(
         file_path=str(path),
         filename=path.name,
@@ -226,6 +272,7 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
         sr=sr,
         beat_times=beat_times,
         downbeat_times=downbeat_times,
+        fingerprint=fingerprint,
     )
 
 
@@ -269,6 +316,7 @@ def compute_embeddings_batch(
             return_tensors="pt",
             padding=True,
         )
+        inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.get_audio_features(**inputs)
 
@@ -312,6 +360,7 @@ class Song:
     beat_times: list[float] = field(default_factory=list)
     downbeat_times: list[float] = field(default_factory=list)
     content_hash: str = ""
+    fingerprint: str = ""
 
     # ------------------------------------------------------------------
     # Factory method — the primary way to create a Song from a file
@@ -358,7 +407,10 @@ class Song:
         # --- 4. Key estimation (Essentia) ---------------------------------
         key = _estimate_key(y, sr)
 
-        # --- 5. CLAP embedding --------------------------------------------
+        # --- 5. Audio fingerprint (Chromaprint) ---------------------------
+        fingerprint = _compute_fingerprint(y, sr)
+
+        # --- 6. CLAP embedding --------------------------------------------
         embedding = cls._compute_embedding(y, sr)
 
         return cls(
@@ -369,6 +421,7 @@ class Song:
             embedding=embedding,
             beat_times=beat_times,
             downbeat_times=downbeat_times,
+            fingerprint=fingerprint,
         )
 
     # ------------------------------------------------------------------
@@ -395,6 +448,7 @@ class Song:
 
         # Prepare inputs and run inference (no gradients needed)
         inputs = processor(audio=y, sampling_rate=target_sr, return_tensors="pt")
+        inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.get_audio_features(**inputs)
 

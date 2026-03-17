@@ -125,7 +125,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if new_paths:
             logger.info("Analysing %d new song(s)...", len(new_paths))
-            new_songs = analyse_new_songs(new_paths)
+            new_songs = analyse_new_songs(
+                new_paths,
+                known_fingerprints=dj_graph.known_fingerprints,
+            )
             if new_songs:
                 dj_graph.add_songs_incremental(new_songs)
                 changed = True

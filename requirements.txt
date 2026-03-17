@@ -23,5 +23,11 @@ uvicorn[standard]>=0.29.0
 # Fast JSON serialization
 orjson>=3.9.0
 
+# Audio fingerprinting (Chromaprint)
+# System dependency: libchromaprint-dev (Debian/Ubuntu) or chromaprint (brew)
+#   sudo apt-get install libchromaprint-dev   # Debian/Ubuntu
+#   brew install chromaprint                   # macOS
+pyacoustid>=1.2.0
+
 # Utilities
 numpy>=1.24.0

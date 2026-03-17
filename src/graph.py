@@ -222,6 +222,15 @@ class DJGraph:
         """Return the set of content hashes for all songs in the graph."""
         return {s.content_hash for s in self._songs.values() if s.content_hash}
 
+    @property
+    def known_fingerprints(self) -> dict[str, str]:
+        """Return a mapping of fingerprint → file_path for all songs."""
+        return {
+            s.fingerprint: s.file_path
+            for s in self._songs.values()
+            if s.fingerprint
+        }
+
     def add_songs_incremental(
         self,
         new_songs: list[Song],
@@ -427,6 +436,7 @@ class DJGraph:
                 "key": song.key,
                 "embedding_b64": base64.b64encode(emb_bytes).decode("ascii"),
                 "content_hash": song.content_hash,
+                "fingerprint": song.fingerprint,
             })
 
         has_edge_type = "edge_type" in self.graph.es.attributes() if self.graph.ecount() > 0 else False
@@ -481,6 +491,7 @@ class DJGraph:
                 key=s["key"],
                 embedding=emb,
                 content_hash=s.get("content_hash", ""),
+                fingerprint=s.get("fingerprint", ""),
             )
             instance._songs[song.file_path] = song
             instance._filename_index[song.filename] = song
@@ -539,6 +550,7 @@ class DJGraph:
                 "key": song.key,
                 "embedding": song.embedding,
                 "content_hash": song.content_hash,
+                "fingerprint": song.fingerprint,
             })
 
         has_edge_type = "edge_type" in self.graph.es.attributes() if self.graph.ecount() > 0 else False
@@ -585,6 +597,7 @@ class DJGraph:
                 key=s["key"],
                 embedding=emb,
                 content_hash=s.get("content_hash", ""),
+                fingerprint=s.get("fingerprint", ""),
             )
             instance._songs[song.file_path] = song
             instance._filename_index[song.filename] = song

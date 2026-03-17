@@ -159,7 +159,11 @@ def _load_graph_background() -> None:
 
         if new_paths:
             logger.info("Analysing %d new song(s)...", len(new_paths))
-            new_songs = analyse_new_songs(new_paths, progress_callback=_progress_callback)
+            new_songs = analyse_new_songs(
+                new_paths,
+                progress_callback=_progress_callback,
+                known_fingerprints=graph.known_fingerprints,
+            )
             if new_songs:
                 graph.add_songs_incremental(new_songs)
                 sync_changed = True

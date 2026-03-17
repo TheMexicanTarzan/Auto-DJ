@@ -32,6 +32,47 @@ SUPPORTED_EXTENSIONS: set[str] = {
 _CHUNK_SIZE = 5
 
 
+def _fingerprint_match(fp_a: str, fp_b: str, threshold: float = 0.8) -> bool:
+    """
+    Compare two Chromaprint fingerprints and return True if they
+    represent the same audio content (similarity >= *threshold*).
+
+    Uses bitwise Hamming similarity over the decoded integer arrays.
+    Returns False if either fingerprint is empty or cannot be decoded.
+    """
+    if not fp_a or not fp_b:
+        return False
+
+    try:
+        import chromaprint
+    except ImportError:
+        return False
+
+    try:
+        raw_a, _ = chromaprint.decode_fingerprint(fp_a)
+        raw_b, _ = chromaprint.decode_fingerprint(fp_b)
+    except Exception:
+        return False
+
+    if not raw_a or not raw_b:
+        return False
+
+    # Compare over the overlapping portion
+    length = min(len(raw_a), len(raw_b))
+    if length == 0:
+        return False
+
+    matching_bits = 0
+    total_bits = length * 32  # each element is a 32-bit integer
+    for a, b in zip(raw_a[:length], raw_b[:length]):
+        # XOR gives bits that differ; popcount gives the count
+        xor = a ^ b
+        matching_bits += 32 - bin(xor & 0xFFFFFFFF).count("1")
+
+    similarity = matching_bits / total_bits
+    return similarity >= threshold
+
+
 def _file_hash(path: Path, chunk_size: int = 65_536) -> str:
     """
     Compute a SHA-256 hash of a file's contents.
@@ -155,14 +196,40 @@ def scan_directory(
                 beat_times=analysis.beat_times,
                 downbeat_times=analysis.downbeat_times,
                 content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+                fingerprint=analysis.fingerprint,
             ))
 
+    # --- Phase 3: fingerprint-based deduplication ---
+    # Catches cross-format / cross-album duplicates that SHA-256 misses
+    # (e.g. same song as .mp3 and .flac with different binary content).
+    accepted: list[Song] = []
+    fp_dupes = 0
+    for song in songs:
+        if not song.fingerprint:
+            accepted.append(song)
+            continue
+        is_dup = False
+        for existing in accepted:
+            if existing.fingerprint and _fingerprint_match(song.fingerprint, existing.fingerprint):
+                logger.warning(
+                    "Skipping fingerprint duplicate: '%s' (matches '%s').",
+                    song.filename,
+                    existing.filename,
+                )
+                fp_dupes += 1
+                is_dup = True
+                break
+        if not is_dup:
+            accepted.append(song)
+
     logger.info(
-        "Scan complete: %d song(s) loaded, %d duplicate(s) skipped.",
-        len(songs),
+        "Scan complete: %d song(s) loaded, %d hash duplicate(s) skipped, "
+        "%d fingerprint duplicate(s) skipped.",
+        len(accepted),
         skipped,
+        fp_dupes,
     )
-    return songs
+    return accepted
 
 
 def discover_changes(
@@ -216,6 +283,7 @@ def discover_changes(
 def analyse_new_songs(
     paths: list[Path],
     progress_callback: callable | None = None,
+    known_fingerprints: dict[str, str] | None = None,
 ) -> list[Song]:
     """
     Analyse a list of audio file paths and return Song objects.
@@ -223,6 +291,13 @@ def analyse_new_songs(
     Same chunked pipeline as scan_directory but without the discovery
     and deduplication steps (callers are expected to pass already-
     deduplicated paths from ``discover_changes``).
+
+    Args:
+        paths: Audio file paths to analyse.
+        progress_callback: Optional ``fn(current, total, filename)``.
+        known_fingerprints: Optional dict mapping fingerprint → file_path
+            for songs already in the graph.  New songs whose fingerprint
+            matches an existing one are skipped as duplicates.
     """
     if not paths:
         return []
@@ -266,7 +341,27 @@ def analyse_new_songs(
                 beat_times=analysis.beat_times,
                 downbeat_times=analysis.downbeat_times,
                 content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+                fingerprint=analysis.fingerprint,
             ))
+
+    # Fingerprint dedup against existing graph songs
+    if known_fingerprints:
+        accepted: list[Song] = []
+        for song in songs:
+            if song.fingerprint:
+                for known_fp, known_path in known_fingerprints.items():
+                    if _fingerprint_match(song.fingerprint, known_fp):
+                        logger.warning(
+                            "Skipping fingerprint duplicate: '%s' (matches existing '%s').",
+                            song.filename,
+                            Path(known_path).name,
+                        )
+                        break
+                else:
+                    accepted.append(song)
+            else:
+                accepted.append(song)
+        songs = accepted
 
     logger.info("Analysed %d new song(s).", len(songs))
     return songs
