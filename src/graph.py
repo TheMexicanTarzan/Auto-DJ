@@ -377,8 +377,8 @@ class DJGraph:
 
         # Sensible FR defaults — can be overridden via **kwargs.
         fr_defaults = {
-            "niter": 2000,
-            "start_temp": 100,
+            "niter": 500,
+            "start_temp": 50,
             "weights": self.graph.es["weight"] if self.graph.ecount() > 0 else None,
         }
 
