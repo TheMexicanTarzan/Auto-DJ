@@ -241,7 +241,7 @@ def _build_directory_tree(graph: DJGraph) -> dict:
             rel = Path(song.file_path).resolve().relative_to(base)
         except ValueError:
             # Song outside SONGS_DIRECTORY — put in root
-            rel = Path(song.file_path).name
+            rel = Path(Path(song.file_path).name)
         parent = str(rel.parent) if rel.parent != Path(".") else "."
         dir_counts[parent] += 1
 
