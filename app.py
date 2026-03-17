@@ -30,6 +30,8 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from collections import defaultdict
+
 from src.config import CACHE_PATH, SONGS_DIRECTORY, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
 from src.utils import analyse_new_songs, discover_changes, scan_directory
@@ -222,6 +224,56 @@ def _orjson_response(data: object, status_code: int = 200) -> Response:
     )
 
 
+def _build_directory_tree(graph: DJGraph) -> dict:
+    """Build a nested directory tree from song file paths.
+
+    Returns a dict like:
+        {"name": "root", "children": [{"name": "Genre A", "children": [...]}]}
+
+    Each leaf directory (one that directly contains songs) also has a
+    ``"count"`` key with the number of songs it holds.
+    """
+    base = Path(SONGS_DIRECTORY).resolve()
+    dir_counts: dict[str, int] = defaultdict(int)
+
+    for song in graph.songs:
+        try:
+            rel = Path(song.file_path).resolve().relative_to(base)
+        except ValueError:
+            # Song outside SONGS_DIRECTORY — put in root
+            rel = Path(song.file_path).name
+        parent = str(rel.parent) if rel.parent != Path(".") else "."
+        dir_counts[parent] += 1
+
+    # Build nested tree from flat directory paths
+    tree: dict = {"name": "All Songs", "children": [], "count": 0}
+    nodes_map: dict[str, dict] = {".": tree}
+
+    for dir_path in sorted(dir_counts):
+        parts = dir_path.split("/") if dir_path != "." else []
+        current_path = "."
+        parent_node = tree
+        for part in parts:
+            current_path = part if current_path == "." else current_path + "/" + part
+            if current_path not in nodes_map:
+                child: dict = {"name": part, "path": current_path, "children": [], "count": 0}
+                parent_node["children"].append(child)
+                nodes_map[current_path] = child
+            parent_node = nodes_map[current_path]
+        parent_node["count"] = dir_counts[dir_path]
+
+    # Roll up counts to parent directories
+    def _rollup(node: dict) -> int:
+        total = node.get("count", 0)
+        for child in node.get("children", []):
+            total += _rollup(child)
+        node["count"] = total
+        return total
+
+    _rollup(tree)
+    return tree
+
+
 # ---------------------------------------------------------------------------
 # FastAPI application
 # ---------------------------------------------------------------------------
@@ -296,6 +348,8 @@ def api_graph(request: Request):
         edges = []
         type_counts = {}
 
+    directory_tree = _build_directory_tree(graph)
+
     return Response(
         content=orjson.dumps({
             "nodes": nodes,
@@ -303,6 +357,8 @@ def api_graph(request: Request):
             "num_nodes": graph.num_nodes,
             "num_edges": graph.num_edges,
             "edge_type_counts": type_counts,
+            "songs_directory": str(Path(SONGS_DIRECTORY).resolve()),
+            "directory_tree": directory_tree,
         }),
         media_type="application/json",
         headers={"ETag": etag},
@@ -335,6 +391,7 @@ class PathRequest(BaseModel):
     start: str
     end: str
     allowed_types: list[str] | None = None
+    excluded_dirs: list[str] | None = None
 
 
 @app.post("/api/path")
@@ -363,10 +420,14 @@ def api_path(req: PathRequest):
         })
 
     allowed = set(req.allowed_types) if req.allowed_types else None
+    excluded = set(req.excluded_dirs) if req.excluded_dirs else None
 
     try:
         path, total_cost = graph.get_shortest_path(
-            req.start, req.end, allowed_types=allowed,
+            req.start, req.end,
+            allowed_types=allowed,
+            excluded_dirs=excluded,
+            songs_directory=SONGS_DIRECTORY,
         )
     except NoPathError:
         return _orjson_response({

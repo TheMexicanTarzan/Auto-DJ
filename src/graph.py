@@ -650,6 +650,8 @@ class DJGraph:
         target_id: str,
         *,
         allowed_types: set[str] | None = None,
+        excluded_dirs: set[str] | None = None,
+        songs_directory: str | None = None,
     ) -> tuple[list[Song], float]:
         """
         Find the lowest-cost sequence of transitions from source to target
@@ -689,15 +691,49 @@ class DJGraph:
                 f"No path between '{source.filename}' and '{target.filename}'"
             )
 
-        # Build weight list, masking out excluded edge types
+        # Build set of excluded vertex indices (for directory filtering)
+        excluded_vertices: set[int] | None = None
+        if excluded_dirs and songs_directory:
+            from pathlib import Path as _Path
+            base = _Path(songs_directory).resolve()
+            excluded_vertices = set()
+            for v in self.graph.vs:
+                try:
+                    rel_parent = str(
+                        _Path(v["name"]).resolve().relative_to(base).parent
+                    )
+                except ValueError:
+                    rel_parent = "."
+                if rel_parent == ".":
+                    rel_parent = "."
+                for exdir in excluded_dirs:
+                    if rel_parent == exdir or rel_parent.startswith(exdir + "/"):
+                        excluded_vertices.add(v.index)
+                        break
+
+        # Build weight list, masking out excluded edge types and directories
         has_edge_type = "edge_type" in self.graph.es.attributes()
-        if allowed_types is not None and has_edge_type:
-            edge_weights = [
-                e["weight"]
-                if (e["edge_type"] or "direct") in allowed_types
-                else float("inf")
-                for e in self.graph.es
-            ]
+        need_custom_weights = (
+            (allowed_types is not None and has_edge_type)
+            or excluded_vertices
+        )
+        if need_custom_weights:
+            edge_list = self.graph.get_edgelist()
+            edge_weights = []
+            for i, e in enumerate(self.graph.es):
+                src_idx, tgt_idx = edge_list[i]
+                # Exclude edges touching nodes in excluded directories
+                if excluded_vertices and (
+                    src_idx in excluded_vertices or tgt_idx in excluded_vertices
+                ):
+                    edge_weights.append(float("inf"))
+                    continue
+                # Exclude edges with disallowed types
+                if allowed_types is not None and has_edge_type:
+                    if (e["edge_type"] or "direct") not in allowed_types:
+                        edge_weights.append(float("inf"))
+                        continue
+                edge_weights.append(e["weight"])
         else:
             edge_weights = "weight"
 

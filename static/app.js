@@ -53,6 +53,11 @@ var detailNode = null;        // node selected via details/click
 // Pre-computed adjacency cache: nodeId -> { neighbors: Set, edges: Set }
 var adjacencyCache = new Map();
 
+// Directory filtering state
+var songsBaseDir = "";           // absolute path prefix from server
+var directoryTree = null;        // nested tree from /api/graph
+var activeDirectories = null;    // null = all visible; Set of active dir paths when filtering
+
 // Shared singleton returned for dimmed (non-highlighted, non-hovered) nodes
 var DIMMED_NODE = Object.freeze({
   color: "#4a5568",
@@ -181,8 +186,22 @@ function updateHeaderStats(graphData) {
   headerStats.textContent = parts.join(" | ");
 }
 
+/** Compute the relative directory of a node id given the base path. */
+function nodeDirectory(nodeId, base) {
+  if (!base) return ".";
+  // Strip base prefix + trailing separator
+  var rel = nodeId;
+  if (nodeId.indexOf(base) === 0) {
+    rel = nodeId.slice(base.length);
+    if (rel.charAt(0) === "/") rel = rel.slice(1);
+  }
+  var lastSlash = rel.lastIndexOf("/");
+  return lastSlash === -1 ? "." : rel.slice(0, lastSlash);
+}
+
 function buildGraphology(graphData) {
   var graph = new graphology.Graph({ multi: false, type: "undirected" });
+  var base = graphData.songs_directory || "";
 
   graphData.nodes.forEach(function (n) {
     graph.addNode(n.id, {
@@ -193,6 +212,7 @@ function buildGraphology(graphData) {
       color: "#6c7a89",
       bpm: n.bpm,
       key: n.key,
+      directory: nodeDirectory(n.id, base),
     });
   });
 
@@ -219,6 +239,9 @@ async function loadGraph() {
   var graphData = await graphResp.json();
   songList = await songsResp.json();
   songList.forEach(function (s) { s._lower = s.label.toLowerCase(); });
+
+  songsBaseDir = graphData.songs_directory || "";
+  directoryTree = graphData.directory_tree || null;
 
   graphInstance = buildGraphology(graphData);
   buildAdjacencyCache();
@@ -297,6 +320,11 @@ async function loadGraph() {
 
   // Populate search inputs
   populateSearch();
+
+  // Render directory filter tree
+  if (directoryTree) {
+    renderDirectoryTree(directoryTree);
+  }
 }
 
 /** Reload graph data from server (after recalculate) without full page reload. */
@@ -312,7 +340,11 @@ async function reloadGraphData() {
   hoveredEdgeKeys.clear();
   detailNode = null;
 
+  songsBaseDir = graphData.songs_directory || songsBaseDir;
+  directoryTree = graphData.directory_tree || directoryTree;
+
   // Rebuild graphology keeping existing positions
+  var base = songsBaseDir;
   graphInstance.clear();
   graphData.nodes.forEach(function (n) {
     graphInstance.addNode(n.id, {
@@ -322,6 +354,7 @@ async function reloadGraphData() {
       color: "#6c7a89",
       bpm: n.bpm,
       key: n.key,
+      directory: nodeDirectory(n.id, base),
     });
   });
   graphData.edges.forEach(function (e) {
@@ -345,7 +378,24 @@ async function reloadGraphData() {
 // 3. Reducers (control what is visible)
 // =========================================================================
 
+// Frozen singleton for hidden (directory-filtered) nodes
+var HIDDEN_NODE = Object.freeze({
+  hidden: true,
+  color: "#4a5568",
+  size: 0,
+  label: null,
+  zIndex: 0,
+});
+
 function nodeReducer(node, data) {
+  // Directory filter: hide nodes not in active directories
+  if (activeDirectories !== null) {
+    var nodeDir = data.directory || ".";
+    if (!isDirectoryActive(nodeDir)) {
+      return HIDDEN_NODE;
+    }
+  }
+
   // Fast path: nothing active — return data as-is (zero allocation)
   if (highlightedNodes.size === 0 && hoveredNode === null && detailNode === null) {
     return data;
@@ -398,6 +448,19 @@ function nodeReducer(node, data) {
 }
 
 function edgeReducer(edge, data) {
+  // Directory filter: hide edges touching excluded nodes
+  if (activeDirectories !== null) {
+    var extremities = graphInstance.extremities(edge);
+    var srcDir = graphInstance.getNodeAttribute(extremities[0], "directory") || ".";
+    var tgtDir = graphInstance.getNodeAttribute(extremities[1], "directory") || ".";
+    if (!isDirectoryActive(srcDir) || !isDirectoryActive(tgtDir)) {
+      if (data.hidden) return data;
+      var h = Object.assign({}, data);
+      h.hidden = true;
+      return h;
+    }
+  }
+
   // Fast path: check the two cheap conditions first
   var isHighlighted = highlightedEdges.has(edge);
   var isHovered = hoveredNode !== null && hoveredEdgeKeys.has(edge);
@@ -509,7 +572,227 @@ async function loadNodeDetails(nodeId) {
 }
 
 // =========================================================================
-// 5. Song search / autocomplete
+// 5. Directory filter tree
+// =========================================================================
+
+/** Collect all leaf directory paths from the tree. */
+function collectAllDirs(node, result) {
+  if (node.path) result.push(node.path);
+  if (node.children) {
+    node.children.forEach(function (c) { collectAllDirs(c, result); });
+  }
+  return result;
+}
+
+/** Render the directory filter tree into #directory-tree. */
+function renderDirectoryTree(tree) {
+  var container = document.getElementById("directory-tree");
+  container.innerHTML = "";
+
+  // If tree has no children (flat library), hide the filter entirely
+  if (!tree.children || tree.children.length === 0) {
+    document.getElementById("directory-filter").style.display = "none";
+    return;
+  }
+
+  document.getElementById("directory-filter").style.display = "";
+
+  // Collect all directory paths for the "all active" baseline
+  var allDirs = collectAllDirs(tree, []);
+
+  function buildNode(node, depth) {
+    var li = document.createElement("li");
+    li.className = "dir-node";
+
+    var row = document.createElement("div");
+    row.className = "dir-row";
+
+    // Indent based on depth
+    row.style.paddingLeft = (depth * 16) + "px";
+
+    // Collapse toggle (only if has children)
+    var toggle = document.createElement("span");
+    toggle.className = "dir-toggle";
+    if (node.children && node.children.length > 0) {
+      toggle.textContent = "\u25BE"; // down arrow
+      toggle.addEventListener("click", function () {
+        var childUl = li.querySelector("ul");
+        if (childUl) {
+          var collapsed = childUl.style.display === "none";
+          childUl.style.display = collapsed ? "" : "none";
+          toggle.textContent = collapsed ? "\u25BE" : "\u25B8"; // down / right arrow
+        }
+      });
+    } else {
+      toggle.textContent = " ";
+      toggle.style.visibility = "hidden";
+    }
+    row.appendChild(toggle);
+
+    // Checkbox
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.className = "dir-checkbox";
+    cb.dataset.path = node.path || ".";
+    row.appendChild(cb);
+
+    // Label
+    var label = document.createElement("span");
+    label.className = "dir-label";
+    label.textContent = node.name;
+    row.appendChild(label);
+
+    // Count badge
+    var badge = document.createElement("span");
+    badge.className = "dir-count";
+    badge.textContent = node.count;
+    row.appendChild(badge);
+
+    li.appendChild(row);
+
+    // Recursively render children
+    if (node.children && node.children.length > 0) {
+      var childUl = document.createElement("ul");
+      childUl.className = "dir-children";
+      node.children.forEach(function (child) {
+        childUl.appendChild(buildNode(child, depth + 1));
+      });
+      li.appendChild(childUl);
+    }
+
+    // Checkbox change: cascade to children, update parent, apply filter
+    cb.addEventListener("change", function () {
+      var checked = cb.checked;
+      // Cascade down
+      var childCbs = li.querySelectorAll(".dir-checkbox");
+      childCbs.forEach(function (ccb) { ccb.checked = checked; });
+      // Update parent checkboxes (bubble up)
+      updateParentCheckboxes(container);
+      // Apply filter
+      applyDirectoryFilter(container, allDirs);
+    });
+
+    return li;
+  }
+
+  var ul = document.createElement("ul");
+  ul.className = "dir-tree-root";
+  tree.children.forEach(function (child) {
+    ul.appendChild(buildNode(child, 0));
+  });
+  container.appendChild(ul);
+}
+
+/** Walk up from each checkbox and set parent checkbox state. */
+function updateParentCheckboxes(container) {
+  // Process from deepest children upward
+  var lists = container.querySelectorAll("ul.dir-children");
+  for (var i = lists.length - 1; i >= 0; i--) {
+    var parentLi = lists[i].parentElement;
+    var parentCb = parentLi.querySelector(":scope > .dir-row > .dir-checkbox");
+    if (!parentCb) continue;
+    var childCbs = lists[i].querySelectorAll(":scope > li > .dir-row > .dir-checkbox");
+    var allChecked = true;
+    var anyChecked = false;
+    childCbs.forEach(function (cb) {
+      if (cb.checked) anyChecked = true;
+      else allChecked = false;
+    });
+    parentCb.checked = allChecked;
+    parentCb.indeterminate = !allChecked && anyChecked;
+  }
+}
+
+/** Read checkbox states and update activeDirectories + refresh graph. */
+function applyDirectoryFilter(container, allDirs) {
+  var checkedPaths = new Set();
+  container.querySelectorAll(".dir-checkbox").forEach(function (cb) {
+    if (cb.checked) checkedPaths.add(cb.dataset.path);
+  });
+
+  // If all directories are checked, set null (no filtering)
+  if (checkedPaths.size >= allDirs.length) {
+    activeDirectories = null;
+  } else {
+    activeDirectories = checkedPaths;
+  }
+
+  // Rebuild filtered song list for autocomplete
+  rebuildFilteredSongList();
+
+  // Refresh sigma to apply reducer filtering
+  if (sigmaInstance) {
+    scheduleRefresh();
+  }
+
+  // Update header stats with filtered counts
+  updateFilteredStats();
+}
+
+// Filtered song list for autocomplete (rebuilt on directory change)
+var filteredSongList = null; // null = use songList (no filter)
+
+function rebuildFilteredSongList() {
+  if (activeDirectories === null) {
+    filteredSongList = null;
+    return;
+  }
+  filteredSongList = songList.filter(function (s) {
+    var dir = nodeDirectory(s.id, songsBaseDir);
+    // Check if this dir or any parent is in activeDirectories
+    return isDirectoryActive(dir);
+  });
+}
+
+/** Check if a directory path is active (matches or is a child of an active dir). */
+function isDirectoryActive(dir) {
+  if (activeDirectories === null) return true;
+  if (activeDirectories.has(dir)) return true;
+  // Check parent paths
+  var idx = dir.lastIndexOf("/");
+  while (idx !== -1) {
+    var parent = dir.slice(0, idx);
+    if (activeDirectories.has(parent)) return true;
+    idx = parent.lastIndexOf("/");
+  }
+  return activeDirectories.has(".");
+}
+
+/** Update header stats to reflect filtered node/edge counts. */
+function updateFilteredStats() {
+  if (!graphInstance || !headerStats) return;
+
+  if (activeDirectories === null) {
+    // No filter — show original stats
+    var totalNodes = graphInstance.order;
+    var totalEdges = graphInstance.size;
+    headerStats.textContent = totalNodes + " tracks | " + totalEdges + " transitions";
+    return;
+  }
+
+  // Count visible nodes
+  var visibleNodes = 0;
+  graphInstance.forEachNode(function (node, attrs) {
+    var dir = attrs.directory || ".";
+    if (isDirectoryActive(dir)) visibleNodes++;
+  });
+
+  // Count visible edges (both endpoints visible)
+  var visibleEdges = 0;
+  graphInstance.forEachEdge(function (edge, attrs, src, tgt, srcAttrs, tgtAttrs) {
+    var srcDir = srcAttrs.directory || ".";
+    var tgtDir = tgtAttrs.directory || ".";
+    if (isDirectoryActive(srcDir) && isDirectoryActive(tgtDir)) visibleEdges++;
+  });
+
+  var total = graphInstance.order;
+  headerStats.textContent =
+    visibleNodes + " of " + total + " tracks | " + visibleEdges + " transitions (filtered)";
+}
+
+// =========================================================================
+// 6. Song search / autocomplete
 // =========================================================================
 
 function populateSearch() {
@@ -542,7 +825,8 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
         return;
       }
 
-      var matches = songList.filter(function (s) {
+      var searchList = filteredSongList || songList;
+      var matches = searchList.filter(function (s) {
         return s._lower.indexOf(query) !== -1;
       }).slice(0, 50);
 
@@ -637,6 +921,15 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
 
   try {
     var allowedTypes = getAllowedTypes();
+    // Build excluded directories list (send the smaller set)
+    var excludedDirs = null;
+    if (activeDirectories !== null && directoryTree) {
+      var allDirs = collectAllDirs(directoryTree, []);
+      excludedDirs = allDirs.filter(function (d) {
+        return !isDirectoryActive(d);
+      });
+      if (excludedDirs.length === 0) excludedDirs = null;
+    }
     var resp = await fetch("/api/path", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -644,6 +937,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
         start: startId,
         end: endId,
         allowed_types: allowedTypes.length < 3 ? allowedTypes : null,
+        excluded_dirs: excludedDirs,
       }),
     });
     var result = await resp.json();
