@@ -150,13 +150,10 @@ def _load_graph_background() -> None:
             logger.warning("Cannot scan directory for changes: %s", exc)
             new_paths, removed_hashes = [], set()
 
-        sync_changed = False
-
-        if removed_hashes:
-            logger.info("Removing %d deleted song(s)...", len(removed_hashes))
-            graph.remove_songs(removed_hashes)
-            sync_changed = True
-
+        # --- Analyse new songs BEFORE mutating the graph ---
+        # This keeps the mutation window (where API reads could see
+        # inconsistent state) as short as possible.
+        new_songs: list = []
         if new_paths:
             logger.info("Analysing %d new song(s)...", len(new_paths))
             new_songs = analyse_new_songs(
@@ -164,15 +161,23 @@ def _load_graph_background() -> None:
                 progress_callback=_progress_callback,
                 known_fingerprints=graph.known_fingerprints,
             )
-            if new_songs:
-                graph.add_songs_incremental(new_songs)
-                sync_changed = True
+
+        # --- Apply all mutations in a tight block ---
+        sync_changed = False
+        if removed_hashes:
+            logger.info("Removing %d deleted song(s)...", len(removed_hashes))
+            graph.remove_songs(removed_hashes)
+            sync_changed = True
+
+        if new_songs:
+            graph.add_songs_incremental(new_songs)
+            sync_changed = True
 
         if sync_changed:
-            with _graph_lock:
-                _graph_state["version"] += 1
             CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
             graph.save_to_pickle(CACHE_PATH)
+            with _graph_lock:
+                _graph_state["version"] += 1
             logger.info("Cache updated with library changes.")
 
     except Exception as exc:

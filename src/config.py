@@ -14,10 +14,10 @@ _PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 # environment variable, or change the default below to point at your
 # music library.  The Dash app loads the graph from this directory on
 # startup (or from the JSON cache if it already exists).
-SONGS_DIRECTORY: str = os.environ.get(
+SONGS_DIRECTORY: str = str(Path(os.environ.get(
     "SONGS_DIRECTORY",
-    str(_PROJECT_ROOT / ".." /'Playlists'),
-)
+    str(_PROJECT_ROOT / ".." / 'Playlists'),
+)).resolve())
 
 # Disk cache for the serialised graph.  If this file exists the app
 # skips the expensive directory-scan + embedding step entirely.

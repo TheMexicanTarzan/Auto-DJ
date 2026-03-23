@@ -639,18 +639,39 @@ class DJGraph:
         """
         Look up a Song by file_path or filename.
 
-        Both lookups are O(1) dict operations.
+        Tries, in order:
+            1. Exact file_path match (O(1)).
+            2. Exact filename match (O(1)).
+            3. Resolved-path match — handles symlinks, ``..``, or
+               differing path representations (O(n) fallback).
+            4. Basename-of-path match — if *identifier* looks like a
+               full path but only the filename portion is needed (O(1)).
 
         Raises:
             KeyError: If no song matches.
         """
-        # Fast path: direct file_path match
+        from pathlib import Path as _Path
+
+        # 1. Direct file_path match
         if identifier in self._songs:
             return self._songs[identifier]
 
-        # Fast path: filename match via dedicated index
+        # 2. Filename match via dedicated index
         if identifier in self._filename_index:
             return self._filename_index[identifier]
+
+        # 3. Resolved-path fallback (handles symlinks / ".." / mount diffs)
+        try:
+            resolved = str(_Path(identifier).resolve())
+            if resolved in self._songs:
+                return self._songs[resolved]
+        except (OSError, ValueError):
+            pass
+
+        # 4. Basename fallback (file_path sent but only filename stored)
+        basename = _Path(identifier).name
+        if basename in self._filename_index:
+            return self._filename_index[basename]
 
         raise KeyError(
             f"No song found for '{identifier}'. "

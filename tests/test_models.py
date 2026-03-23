@@ -381,6 +381,7 @@ class TestScanDirectory:
                 bpm=120.0, key="C major",
                 audio=np.zeros(100, dtype=np.float32), sr=44100,
                 beat_times=[0.0, 0.5], downbeat_times=[0.0],
+                fingerprint="",
             )
 
         mock_analyse.side_effect = fake_analyse
@@ -410,6 +411,7 @@ class TestScanDirectory:
                 bpm=120.0, key="C major",
                 audio=np.zeros(100, dtype=np.float32), sr=44100,
                 beat_times=[], downbeat_times=[],
+                fingerprint="",
             )
 
         mock_analyse.side_effect = fake_analyse
@@ -433,6 +435,7 @@ class TestScanDirectory:
                 bpm=120.0, key="C major",
                 audio=np.zeros(100, dtype=np.float32), sr=44100,
                 beat_times=[], downbeat_times=[],
+                fingerprint="",
             )
 
         mock_analyse.side_effect = fake_analyse

@@ -748,6 +748,9 @@ function rebuildFilteredSongList() {
 /** Check if a directory path is active (matches or is a child of an active dir). */
 function isDirectoryActive(dir) {
   if (activeDirectories === null) return true;
+  // Root-level songs ("." directory) are always visible — there is no
+  // UI checkbox to exclude them and hiding them would be surprising.
+  if (dir === ".") return true;
   if (activeDirectories.has(dir)) return true;
   // Check parent paths
   var idx = dir.lastIndexOf("/");
@@ -756,7 +759,7 @@ function isDirectoryActive(dir) {
     if (activeDirectories.has(parent)) return true;
     idx = parent.lastIndexOf("/");
   }
-  return activeDirectories.has(".");
+  return false;
 }
 
 /** Update header stats to reflect filtered node/edge counts. */
