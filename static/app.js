@@ -956,15 +956,19 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
     highlightedEdges.clear();
 
     result.path_nodes.forEach(function (nid) {
-      highlightedNodes.add(nid);
+      if (graphInstance.hasNode(nid)) highlightedNodes.add(nid);
     });
 
     // Find edge keys in graphology for each path edge pair
     // (undirected graph — edge() returns the key regardless of argument order)
+    // Guard with hasNode() in case the backend graph was updated after the
+    // frontend loaded its snapshot (stale node IDs would crash .edge()).
     result.path_edges.forEach(function (pair) {
-      var edgeKey = graphInstance.edge(pair[0], pair[1]);
-      if (edgeKey != null) {
-        highlightedEdges.add(edgeKey);
+      if (graphInstance.hasNode(pair[0]) && graphInstance.hasNode(pair[1])) {
+        var edgeKey = graphInstance.edge(pair[0], pair[1]);
+        if (edgeKey != null) {
+          highlightedEdges.add(edgeKey);
+        }
       }
     });
 
