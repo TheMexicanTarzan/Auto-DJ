@@ -58,13 +58,6 @@ var songsBaseDir = "";           // absolute path prefix from server
 var directoryTree = null;        // nested tree from /api/graph
 var activeDirectories = null;    // null = all visible; Set of active dir paths when filtering
 
-// Shared singleton returned for dimmed (non-highlighted, non-hovered) nodes
-var DIMMED_NODE = Object.freeze({
-  color: "#4a5568",
-  size: 1.5,
-  label: null,
-  zIndex: 0,
-});
 
 // requestAnimationFrame gate for hover refreshes
 var pendingRefresh = null;
@@ -378,21 +371,13 @@ async function reloadGraphData() {
 // 3. Reducers (control what is visible)
 // =========================================================================
 
-// Frozen singleton for hidden (directory-filtered) nodes
-var HIDDEN_NODE = Object.freeze({
-  hidden: true,
-  color: "#4a5568",
-  size: 0,
-  label: null,
-  zIndex: 0,
-});
 
 function nodeReducer(node, data) {
   // Directory filter: hide nodes not in active directories
   if (activeDirectories !== null) {
     var nodeDir = data.directory || ".";
     if (!isDirectoryActive(nodeDir)) {
-      return HIDDEN_NODE;
+      return { x: data.x, y: data.y, hidden: true, color: "#4a5568", size: 0, label: null, zIndex: 0 };
     }
   }
 
@@ -406,9 +391,9 @@ function nodeReducer(node, data) {
   var isHighlighted = highlightedNodes.has(node);
   var isDetail = detailNode !== null && node === detailNode;
 
-  // Dim path: node is not involved in any active state — return frozen singleton
+  // Dim path: node is not involved in any active state
   if (highlightedNodes.size > 0 && !isHighlighted && !isHovered && !isNeighbor && !isDetail) {
-    return DIMMED_NODE;
+    return { x: data.x, y: data.y, color: "#4a5568", size: 1.5, label: null, zIndex: 0 };
   }
 
   // Only remaining: nodes that actually need modification
