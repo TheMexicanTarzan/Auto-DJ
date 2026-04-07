@@ -8,7 +8,8 @@
  *   - Path highlighting (nodes + edges) with edge-type coloring
  *   - Node click inspection (top-K neighbours)
  *   - Tempo-relationship checkboxes for pathfinding / neighbor filtering
- *   - Weight tuning with server-side recalculation
+ *   - Directory tree filtering
+ *   - Tabbed sidebar navigation
  */
 
 /* global graphology, Sigma */
@@ -102,6 +103,15 @@ function getAllowedTypes() {
   if (document.getElementById("filter-double").checked)  types.push("double");
   if (document.getElementById("filter-triplet").checked) types.push("triplet");
   return types;
+}
+
+/** Escape a string for safe insertion into innerHTML. */
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 // =========================================================================
@@ -320,52 +330,6 @@ async function loadGraph() {
   }
 }
 
-/** Reload graph data from server (after recalculate) without full page reload. */
-async function reloadGraphData() {
-  var graphResp = await fetch("/api/graph");
-  var graphData = await graphResp.json();
-
-  // Clear old state
-  highlightedNodes.clear();
-  highlightedEdges.clear();
-  hoveredNode = null;
-  hoveredNeighbors.clear();
-  hoveredEdgeKeys.clear();
-  detailNode = null;
-
-  songsBaseDir = graphData.songs_directory || songsBaseDir;
-  directoryTree = graphData.directory_tree || directoryTree;
-
-  // Rebuild graphology keeping existing positions
-  var base = songsBaseDir;
-  graphInstance.clear();
-  graphData.nodes.forEach(function (n) {
-    graphInstance.addNode(n.id, {
-      x: n.x, y: n.y,
-      label: n.label,
-      size: 2,
-      color: "#6c7a89",
-      bpm: n.bpm,
-      key: n.key,
-      directory: nodeDirectory(n.id, base),
-    });
-  });
-  graphData.edges.forEach(function (e) {
-    if (!graphInstance.hasEdge(e.source, e.target)) {
-      var etype = e.edge_type || "direct";
-      graphInstance.addEdge(e.source, e.target, {
-        weight: e.weight,
-        edge_type: etype,
-        color: edgePathColor(etype),
-        hidden: true,
-      });
-    }
-  });
-
-  buildAdjacencyCache();
-  sigmaInstance.refresh();
-  updateHeaderStats(graphData);
-}
 
 // =========================================================================
 // 3. Reducers (control what is visible)
@@ -510,7 +474,7 @@ async function loadNodeDetails(nodeId) {
   if (sigmaInstance) scheduleRefresh();
 
   var detailsEl = document.getElementById("node-details");
-  detailsEl.textContent = "Loading...";
+  detailsEl.innerHTML = '<p class="output-msg">Loading...</p>';
 
   var k = parseInt(document.getElementById("top-k-input").value, 10) || 10;
   var types = getAllowedTypes();
@@ -523,36 +487,48 @@ async function loadNodeDetails(nodeId) {
     var data = await resp.json();
 
     if (data.error) {
-      detailsEl.textContent = data.error;
+      detailsEl.innerHTML = '<p class="output-msg">' + escapeHtml(data.error) + '</p>';
       return;
     }
 
-    var lines = [
-      data.node.label,
-      "BPM: " + data.node.bpm + "  |  Key: " + data.node.key,
-      "Path: " + data.node.id,
-      "",
-      "Top " + data.neighbors.length + " Mixable Tracks:",
-      "------------------------------------",
-    ];
+    var html = '<div class="node-header">';
+    html += '<div class="node-title">' + escapeHtml(data.node.label) + '</div>';
+    html += '<div class="node-meta">';
+    html += '<span>BPM: ' + escapeHtml(String(data.node.bpm)) + '</span>';
+    html += '<span>Key: ' + escapeHtml(data.node.key) + '</span>';
+    html += '</div>';
+    html += '<div class="node-path">' + escapeHtml(data.node.id) + '</div>';
+    html += '</div>';
+
+    html += '<div class="neighbors-section">';
+    html += '<div class="neighbors-heading">Top ' + data.neighbors.length + ' Mixable Tracks</div>';
 
     if (data.neighbors.length === 0) {
-      lines.push("  (no compatible neighbours)");
+      html += '<p class="no-neighbors">No compatible neighbours found.</p>';
     } else {
+      html += '<table class="neighbors-table">';
+      html += '<thead><tr><th>#</th><th>Track</th><th>BPM</th><th>Key</th><th>Cost</th></tr></thead>';
+      html += '<tbody>';
       data.neighbors.forEach(function (nbr, i) {
-        var typeTag = nbr.edge_type && nbr.edge_type !== "direct"
-          ? " [" + nbr.edge_type + "]" : "";
-        lines.push(
-          "  " + (i + 1) + ". " + nbr.label + typeTag +
-          "\n     BPM: " + nbr.bpm + " | Key: " + nbr.key +
-          "\n     Transition cost: " + nbr.cost.toFixed(4)
-        );
+        var badge = (nbr.edge_type && nbr.edge_type !== "direct")
+          ? ' <span class="edge-badge edge-badge--' + escapeHtml(nbr.edge_type) + '">'
+            + escapeHtml(nbr.edge_type) + '</span>'
+          : '';
+        html += '<tr>';
+        html += '<td class="col-rank">' + (i + 1) + '</td>';
+        html += '<td>' + escapeHtml(nbr.label) + badge + '</td>';
+        html += '<td>' + escapeHtml(String(nbr.bpm)) + '</td>';
+        html += '<td>' + escapeHtml(nbr.key) + '</td>';
+        html += '<td class="col-cost">' + nbr.cost.toFixed(4) + '</td>';
+        html += '</tr>';
       });
+      html += '</tbody></table>';
     }
 
-    detailsEl.textContent = lines.join("\n");
+    html += '</div>';
+    detailsEl.innerHTML = html;
   } catch (err) {
-    detailsEl.textContent = "Failed to load details.";
+    detailsEl.innerHTML = '<p class="output-msg">Failed to load details.</p>';
   }
 }
 
@@ -899,13 +875,13 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
   var outputEl = document.getElementById("path-output");
 
   if (!startId || !endId) {
-    outputEl.textContent = "Please select both a start and destination song.";
+    outputEl.innerHTML = '<p class="output-msg">Please select both a start and destination song.</p>';
     return;
   }
 
   var btn = document.getElementById("find-path-btn");
   btn.disabled = true;
-  outputEl.textContent = "Finding path...";
+  outputEl.innerHTML = '<p class="output-msg">Finding path...</p>';
 
   try {
     var allowedTypes = getAllowedTypes();
@@ -931,7 +907,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
     var result = await resp.json();
 
     if (result.error) {
-      outputEl.textContent = result.error;
+      outputEl.innerHTML = '<p class="output-msg">' + escapeHtml(result.error) + '</p>';
       clearHighlights();
       return;
     }
@@ -959,9 +935,22 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
 
     syncZIndex();
     sigmaInstance.refresh();
-    outputEl.textContent = result.summary;
+
+    // Render structured path output
+    var html = '<div class="path-summary">' + escapeHtml(result.summary) + '</div>';
+    if (result.path_nodes && result.path_nodes.length > 0) {
+      html += '<ol class="path-list">';
+      result.path_nodes.forEach(function (nid) {
+        var label = graphInstance.hasNode(nid)
+          ? graphInstance.getNodeAttribute(nid, "label")
+          : nid;
+        html += '<li class="path-track">' + escapeHtml(label) + '</li>';
+      });
+      html += '</ol>';
+    }
+    outputEl.innerHTML = html;
   } catch (err) {
-    outputEl.textContent = "Request failed: " + err.message;
+    outputEl.innerHTML = '<p class="output-msg">Request failed: ' + escapeHtml(err.message) + '</p>';
   } finally {
     btn.disabled = false;
   }
@@ -977,48 +966,27 @@ function clearHighlights() {
   }
 }
 
+
 // =========================================================================
-// 7. Recalculate edges
+// 8. Tab navigation
 // =========================================================================
 
-document.getElementById("recalculate-btn").addEventListener("click", async function () {
-  var btn = document.getElementById("recalculate-btn");
-  var statusEl = document.getElementById("recalculate-status");
-  btn.disabled = true;
-  statusEl.textContent = "Recalculating...";
-
-  try {
-    var resp = await fetch("/api/recalculate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        harmonic: parseFloat(document.getElementById("w-harmonic").value) || 0.35,
-        tempo:    parseFloat(document.getElementById("w-tempo").value)    || 0.25,
-        semantic: parseFloat(document.getElementById("w-semantic").value) || 0.40,
-        double_penalty:  parseFloat(document.getElementById("w-double").value)  || 0.0,
-        triplet_penalty: parseFloat(document.getElementById("w-triplet").value) || 0.0,
-      }),
+document.querySelectorAll(".tab-btn").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var tabId = btn.dataset.tab;
+    document.querySelectorAll(".tab-btn").forEach(function (b) {
+      b.classList.remove("active");
     });
-    var result = await resp.json();
-
-    if (result.error) {
-      statusEl.textContent = "Error: " + result.error;
-      return;
-    }
-
-    statusEl.textContent = result.message + " (" + result.num_edges + " edges)";
-
-    // Reload graph to reflect new edges
-    await reloadGraphData();
-  } catch (err) {
-    statusEl.textContent = "Request failed: " + err.message;
-  } finally {
-    btn.disabled = false;
-  }
+    document.querySelectorAll(".tab-panel").forEach(function (p) {
+      p.classList.remove("active");
+    });
+    btn.classList.add("active");
+    document.getElementById("tab-" + tabId).classList.add("active");
+  });
 });
 
 // =========================================================================
-// 8. Bootstrap
+// 9. Bootstrap
 // =========================================================================
 
 startPolling();

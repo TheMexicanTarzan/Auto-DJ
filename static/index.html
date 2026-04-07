@@ -25,77 +25,60 @@
 
   <!-- Main content (hidden until graph ready) -->
   <div id="main-content">
-    <!-- Left sidebar -->
+    <!-- Left sidebar with tabbed navigation -->
     <aside>
-      <h3>Pathfinding</h3>
 
-      <label for="start-search">Start Song</label>
-      <div class="search-wrapper">
-        <input type="text" id="start-search" placeholder="Search for a track..." autocomplete="off">
-        <div class="search-results" id="start-results"></div>
+      <div class="tab-nav">
+        <button class="tab-btn active" data-tab="track-details">Track Details</button>
+        <button class="tab-btn" data-tab="pathfinding">Pathfinding</button>
+        <button class="tab-btn" data-tab="directory-filter">Directory Filter</button>
       </div>
 
-      <label for="end-search">Destination Song</label>
-      <div class="search-wrapper">
-        <input type="text" id="end-search" placeholder="Search for a track..." autocomplete="off">
-        <div class="search-results" id="end-results"></div>
+      <!-- Tab 1: Track Details -->
+      <div class="tab-panel active" id="tab-track-details">
+        <label for="details-search">Search by name</label>
+        <div class="search-wrapper">
+          <input type="text" id="details-search" placeholder="Search for a track..." autocomplete="off">
+          <div class="search-results" id="details-results"></div>
+        </div>
+        <label for="top-k-input">Neighbours to show</label>
+        <input type="number" id="top-k-input" value="10" min="1" max="50">
+        <div id="node-details"><p class="output-msg">Click a node on the graph or search above.</p></div>
       </div>
 
-      <div id="directory-filter">
-        <span class="filter-label">Directory filter</span>
-        <div id="directory-tree"></div>
+      <!-- Tab 2: Pathfinding -->
+      <div class="tab-panel" id="tab-pathfinding">
+        <label for="start-search">Start Song</label>
+        <div class="search-wrapper">
+          <input type="text" id="start-search" placeholder="Search for a track..." autocomplete="off">
+          <div class="search-results" id="start-results"></div>
+        </div>
+
+        <label for="end-search">Destination Song</label>
+        <div class="search-wrapper">
+          <input type="text" id="end-search" placeholder="Search for a track..." autocomplete="off">
+          <div class="search-results" id="end-results"></div>
+        </div>
+
+        <div id="tempo-type-filters">
+          <span class="filter-label">Tempo relationship</span>
+          <label><input type="checkbox" id="filter-direct" checked> Direct</label>
+          <label><input type="checkbox" id="filter-double" checked> Double tempo</label>
+          <label><input type="checkbox" id="filter-triplet" checked> Triplet</label>
+        </div>
+
+        <button id="find-path-btn">Find Path</button>
+
+        <div id="path-output"><p class="output-msg">Select two songs and click Find Path.</p></div>
       </div>
 
-      <div id="tempo-type-filters">
-        <span class="filter-label">Tempo relationship</span>
-        <label><input type="checkbox" id="filter-direct" checked> Direct</label>
-        <label><input type="checkbox" id="filter-double" checked> Double tempo</label>
-        <label><input type="checkbox" id="filter-triplet" checked> Triplet</label>
-      </div>
-
-      <button id="find-path-btn">Find Path</button>
-
-      <div id="path-output">Select two songs and click Find Path.</div>
-
-      <hr>
-
-      <h3>Edge Weights</h3>
-      <div class="weight-controls">
-        <div class="weight-row">
-          <label for="w-harmonic">Harmonic</label>
-          <input type="number" id="w-harmonic" value="0.35" step="0.05" min="0" max="1">
-        </div>
-        <div class="weight-row">
-          <label for="w-tempo">Tempo</label>
-          <input type="number" id="w-tempo" value="0.25" step="0.05" min="0" max="1">
-        </div>
-        <div class="weight-row">
-          <label for="w-semantic">Semantic</label>
-          <input type="number" id="w-semantic" value="0.40" step="0.05" min="0" max="1">
-        </div>
-        <div class="weight-row">
-          <label for="w-double">Double penalty</label>
-          <input type="number" id="w-double" value="0.00" step="0.05" min="0" max="2">
-        </div>
-        <div class="weight-row">
-          <label for="w-triplet">Triplet penalty</label>
-          <input type="number" id="w-triplet" value="0.00" step="0.05" min="0" max="2">
+      <!-- Tab 3: Directory Filter -->
+      <div class="tab-panel" id="tab-directory-filter">
+        <div id="directory-filter">
+          <span class="filter-label">Directory filter</span>
+          <div id="directory-tree"></div>
         </div>
       </div>
-      <button id="recalculate-btn">Recalculate</button>
-      <div id="recalculate-status"></div>
-
-      <hr>
-
-      <h3>Track Details</h3>
-      <label for="details-search">Search by name</label>
-      <div class="search-wrapper">
-        <input type="text" id="details-search" placeholder="Search for a track..." autocomplete="off">
-        <div class="search-results" id="details-results"></div>
-      </div>
-      <label for="top-k-input">Neighbours to show</label>
-      <input type="number" id="top-k-input" value="10" min="1" max="50">
-      <div id="node-details">Click a node on the graph or search above.</div>
 
     </aside>
 
