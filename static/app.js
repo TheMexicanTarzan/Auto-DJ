@@ -42,6 +42,8 @@ var songList = [];          // [{id, label}]
 // Selections
 var startId = null;
 var endId = null;
+var waypoints = [];        // [{key, id}] – ordered intermediate stops
+var waypointCounter = 0;
 
 // Rendering state — sets checked by reducers
 var highlightedNodes = new Set();
@@ -507,7 +509,7 @@ async function loadNodeDetails(nodeId) {
       html += '<p class="no-neighbors">No compatible neighbours found.</p>';
     } else {
       html += '<table class="neighbors-table">';
-      html += '<thead><tr><th>#</th><th>Track</th><th>BPM</th><th>Key</th><th>Cost</th></tr></thead>';
+      html += '<thead><tr><th>#</th><th>Track</th><th>BPM</th><th>Key</th></tr></thead>';
       html += '<tbody>';
       data.neighbors.forEach(function (nbr, i) {
         var badge = (nbr.edge_type && nbr.edge_type !== "direct")
@@ -519,7 +521,6 @@ async function loadNodeDetails(nodeId) {
         html += '<td>' + escapeHtml(nbr.label) + badge + '</td>';
         html += '<td>' + escapeHtml(String(nbr.bpm)) + '</td>';
         html += '<td>' + escapeHtml(nbr.key) + '</td>';
-        html += '<td class="col-cost">' + nbr.cost.toFixed(4) + '</td>';
         html += '</tr>';
       });
       html += '</tbody></table>';
@@ -550,13 +551,13 @@ function renderDirectoryTree(tree) {
   var container = document.getElementById("directory-tree");
   container.innerHTML = "";
 
-  // If tree has no children (flat library), hide the filter entirely
+  // If tree has no children (flat library), hide the whole settings section
+  var dirSection = document.getElementById("settings-dir-section");
   if (!tree.children || tree.children.length === 0) {
-    document.getElementById("directory-filter").style.display = "none";
+    if (dirSection) dirSection.style.display = "none";
     return;
   }
-
-  document.getElementById("directory-filter").style.display = "";
+  if (dirSection) dirSection.style.display = "";
 
   // Collect all directory paths for the "all active" baseline
   var allDirs = collectAllDirs(tree, []);
@@ -771,21 +772,24 @@ function populateSearch() {
   });
 }
 
-function setupAutocomplete(inputId, resultsId, onSelect) {
-  var input = document.getElementById(inputId);
-  var resultsDiv = document.getElementById(resultsId);
+/**
+ * Wire autocomplete behaviour onto pre-existing input + results elements.
+ * Called both for static inputs (via setupAutocomplete) and for dynamically
+ * created waypoint rows.
+ */
+function wireAutocomplete(inputEl, resultsEl, onSelect) {
   var activeIndex = -1;
   var debounceTimer = null;
 
-  input.addEventListener("input", function () {
+  inputEl.addEventListener("input", function () {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(function () {
-      var query = input.value.toLowerCase().trim();
+      var query = inputEl.value.toLowerCase().trim();
       activeIndex = -1;
 
       if (query.length < 1) {
-        resultsDiv.innerHTML = "";
-        resultsDiv.classList.remove("open");
+        resultsEl.innerHTML = "";
+        resultsEl.classList.remove("open");
         return;
       }
 
@@ -795,8 +799,8 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
       }).slice(0, 50);
 
       if (matches.length === 0) {
-        resultsDiv.innerHTML = "";
-        resultsDiv.classList.remove("open");
+        resultsEl.innerHTML = "";
+        resultsEl.classList.remove("open");
         return;
       }
 
@@ -807,21 +811,21 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
         div.textContent = m.label;
         div.addEventListener("mousedown", function (e) {
           e.preventDefault();
-          input.value = m.label;
+          inputEl.value = m.label;
           onSelect(m.id);
-          resultsDiv.classList.remove("open");
+          resultsEl.classList.remove("open");
         });
         frag.appendChild(div);
       });
 
-      resultsDiv.innerHTML = "";
-      resultsDiv.appendChild(frag);
-      resultsDiv.classList.add("open");
+      resultsEl.innerHTML = "";
+      resultsEl.appendChild(frag);
+      resultsEl.classList.add("open");
     }, 100);
   });
 
-  input.addEventListener("keydown", function (e) {
-    var items = resultsDiv.querySelectorAll(".result-item");
+  inputEl.addEventListener("keydown", function (e) {
+    var items = resultsEl.querySelectorAll(".result-item");
     if (!items.length) return;
 
     if (e.key === "ArrowDown") {
@@ -838,22 +842,31 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
         items[activeIndex].dispatchEvent(new Event("mousedown"));
       }
     } else if (e.key === "Escape") {
-      resultsDiv.classList.remove("open");
+      resultsEl.classList.remove("open");
     }
   });
 
-  input.addEventListener("blur", function () {
+  inputEl.addEventListener("blur", function () {
     // Delay to allow click on result item
     setTimeout(function () {
-      resultsDiv.classList.remove("open");
+      resultsEl.classList.remove("open");
     }, 200);
   });
 
-  input.addEventListener("focus", function () {
-    if (input.value.length >= 1 && resultsDiv.children.length > 0) {
-      resultsDiv.classList.add("open");
+  inputEl.addEventListener("focus", function () {
+    if (inputEl.value.length >= 1 && resultsEl.children.length > 0) {
+      resultsEl.classList.add("open");
     }
   });
+}
+
+/** Convenience wrapper for statically-rendered inputs addressed by ID. */
+function setupAutocomplete(inputId, resultsId, onSelect) {
+  wireAutocomplete(
+    document.getElementById(inputId),
+    document.getElementById(resultsId),
+    onSelect
+  );
 }
 
 function updateActive(items, idx) {
@@ -868,7 +881,60 @@ function updateActive(items, idx) {
 }
 
 // =========================================================================
-// 6. Pathfinding
+// 6. Waypoints
+// =========================================================================
+
+/** Dynamically insert a new "Via" search row into the waypoints container. */
+function addWaypointRow() {
+  var key = waypointCounter++;
+  var wp = { key: key, id: null };
+  waypoints.push(wp);
+
+  var container = document.getElementById("waypoints-container");
+
+  var row = document.createElement("div");
+  row.className = "waypoint-row";
+  row.dataset.key = String(key);
+
+  var lbl = document.createElement("label");
+  lbl.textContent = "Via";
+  row.appendChild(lbl);
+
+  var sw = document.createElement("div");
+  sw.className = "search-wrapper";
+
+  var input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Search for a track...";
+  input.autocomplete = "off";
+
+  var results = document.createElement("div");
+  results.className = "search-results";
+
+  sw.appendChild(input);
+  sw.appendChild(results);
+  row.appendChild(sw);
+
+  var removeBtn = document.createElement("button");
+  removeBtn.className = "waypoint-remove-btn";
+  removeBtn.title = "Remove";
+  removeBtn.textContent = "\u00D7"; // ×
+  removeBtn.addEventListener("click", function () {
+    var idx = waypoints.findIndex(function (w) { return w.key === key; });
+    if (idx !== -1) waypoints.splice(idx, 1);
+    row.remove();
+  });
+  row.appendChild(removeBtn);
+
+  container.appendChild(row);
+  wireAutocomplete(input, results, function (id) { wp.id = id; });
+  input.focus();
+}
+
+document.getElementById("add-waypoint-btn").addEventListener("click", addWaypointRow);
+
+// =========================================================================
+// 7. Pathfinding
 // =========================================================================
 
 document.getElementById("find-path-btn").addEventListener("click", async function () {
@@ -878,6 +944,9 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
     outputEl.innerHTML = '<p class="output-msg">Please select both a start and destination song.</p>';
     return;
   }
+
+  // Collect ordered waypoint IDs, skipping any that were left blank
+  var waypointIds = waypoints.map(function (wp) { return wp.id; }).filter(Boolean);
 
   var btn = document.getElementById("find-path-btn");
   btn.disabled = true;
@@ -900,6 +969,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
       body: JSON.stringify({
         start: startId,
         end: endId,
+        waypoints: waypointIds.length > 0 ? waypointIds : null,
         allowed_types: allowedTypes.length < 3 ? allowedTypes : null,
         excluded_dirs: excludedDirs,
       }),
@@ -912,7 +982,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
       return;
     }
 
-    // Update highlights
+    // Update graph highlights
     highlightedNodes.clear();
     highlightedEdges.clear();
 
@@ -920,7 +990,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
       if (graphInstance.hasNode(nid)) highlightedNodes.add(nid);
     });
 
-    // Find edge keys in graphology for each path edge pair
+    // Find edge keys in graphology for each path edge pair.
     // (undirected graph — edge() returns the key regardless of argument order)
     // Guard with hasNode() in case the backend graph was updated after the
     // frontend loaded its snapshot (stale node IDs would crash .edge()).
@@ -936,18 +1006,36 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
     syncZIndex();
     sigmaInstance.refresh();
 
-    // Render structured path output
-    var html = '<div class="path-summary">' + escapeHtml(result.summary) + '</div>';
-    if (result.path_nodes && result.path_nodes.length > 0) {
-      html += '<ol class="path-list">';
-      result.path_nodes.forEach(function (nid) {
-        var label = graphInstance.hasNode(nid)
-          ? graphInstance.getNodeAttribute(nid, "label")
-          : nid;
-        html += '<li class="path-track">' + escapeHtml(label) + '</li>';
-      });
-      html += '</ol>';
+    // Render path as a vertical flow of track cards with arrows between them
+    if (!result.path_nodes || result.path_nodes.length === 0) {
+      outputEl.innerHTML = '<p class="output-msg">No path found.</p>';
+      return;
     }
+
+    var html = '<div class="path-flow">';
+    result.path_nodes.forEach(function (nid, i) {
+      var label = graphInstance.hasNode(nid)
+        ? graphInstance.getNodeAttribute(nid, "label") : nid;
+      var bpm = graphInstance.hasNode(nid)
+        ? graphInstance.getNodeAttribute(nid, "bpm") : "";
+      var key = graphInstance.hasNode(nid)
+        ? graphInstance.getNodeAttribute(nid, "key") : "";
+
+      html += '<div class="path-flow-card">';
+      html += '<div class="path-flow-card-title">' + escapeHtml(label) + '</div>';
+      if (bpm || key) {
+        html += '<div class="path-flow-card-meta">';
+        if (bpm) html += '<span>BPM: ' + escapeHtml(String(bpm)) + '</span>';
+        if (key) html += '<span>Key: ' + escapeHtml(String(key)) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+
+      if (i < result.path_nodes.length - 1) {
+        html += '<div class="path-flow-arrow">\u2193</div>'; // ↓
+      }
+    });
+    html += '</div>';
     outputEl.innerHTML = html;
   } catch (err) {
     outputEl.innerHTML = '<p class="output-msg">Request failed: ' + escapeHtml(err.message) + '</p>';

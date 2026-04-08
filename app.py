@@ -399,13 +399,14 @@ def api_songs(request: Request):
 class PathRequest(BaseModel):
     start: str
     end: str
+    waypoints: list[str] | None = None  # ordered intermediate stops
     allowed_types: list[str] | None = None
     excluded_dirs: list[str] | None = None
 
 
 @app.post("/api/path")
 def api_path(req: PathRequest):
-    """Compute shortest path between two songs."""
+    """Compute the shortest mix path, optionally through one or more waypoints."""
     graph = _get_graph()
     if graph is None:
         return _orjson_response({"error": "Graph not ready"}, status_code=503)
@@ -416,62 +417,74 @@ def api_path(req: PathRequest):
             status_code=400,
         )
 
-    if req.start == req.end:
-        try:
-            song = graph.get_song(req.start)
-        except KeyError as exc:
-            return _orjson_response({"error": str(exc)}, status_code=404)
-        return _orjson_response({
-            "path_nodes": [song.file_path],
-            "path_edges": [],
-            "summary": f"Start and destination are the same track:\n  {song.filename}",
-            "total_cost": 0.0,
-        })
+    # Full ordered list of stops: [start, ...waypoints, end]
+    stops = [req.start] + (req.waypoints or []) + [req.end]
 
     allowed = set(req.allowed_types) if req.allowed_types else None
     excluded = set(req.excluded_dirs) if req.excluded_dirs else None
 
-    try:
-        path, total_cost = graph.get_shortest_path(
-            req.start, req.end,
-            allowed_types=allowed,
-            excluded_dirs=excluded,
-            songs_directory=SONGS_DIRECTORY,
-        )
-    except NoPathError:
-        return _orjson_response({
-            "error": (
-                "No mixable path exists between these two tracks.\n"
-                "The BPM gap at every intermediate step is too large."
-            ),
-        }, status_code=404)
-    except KeyError as exc:
-        return _orjson_response({"error": f"Song not found: {exc}"}, status_code=404)
+    full_path: list = []
+    path_edges: list = []
+    total_cost = 0.0
 
-    # Build text summary using stored edge weights
-    lines = ["SHORTEST MIX PATH", "=" * 40]
-    path_node_ids = [s.file_path for s in path]
-    path_edges = []
+    for i in range(len(stops) - 1):
+        seg_start, seg_end = stops[i], stops[i + 1]
 
-    for i, song in enumerate(path):
-        prefix = "START" if i == 0 else f"  [{i}]"
-        lines.append(f"{prefix}  {song.filename}")
-        lines.append(f"        BPM: {song.bpm}  |  Key: {song.key}")
+        if seg_start == seg_end:
+            # Same node – ensure it appears once then move on
+            if not full_path:
+                try:
+                    full_path.append(graph.get_song(seg_start))
+                except KeyError as exc:
+                    return _orjson_response({"error": str(exc)}, status_code=404)
+            continue
 
-        if i < len(path) - 1:
-            hop_cost, edge_type = graph.edge_info(
-                song.file_path, path[i + 1].file_path,
+        try:
+            seg_path, seg_cost = graph.get_shortest_path(
+                seg_start, seg_end,
+                allowed_types=allowed,
+                excluded_dirs=excluded,
+                songs_directory=SONGS_DIRECTORY,
             )
-            lines.append(f"          -> cost: {hop_cost:.4f} ({edge_type})")
-            path_edges.append([song.file_path, path[i + 1].file_path])
+        except NoPathError:
+            stop_num = i + 1
+            return _orjson_response({
+                "error": (
+                    f"No mixable path exists between stop {stop_num} and "
+                    f"stop {stop_num + 1}. "
+                    "The BPM gap at every intermediate step is too large."
+                ),
+            }, status_code=404)
+        except KeyError as exc:
+            return _orjson_response({"error": f"Song not found: {exc}"}, status_code=404)
 
-    lines.append("-" * 40)
-    lines.append(f"Total cost: {total_cost:.4f}  |  Hops: {len(path) - 1}")
+        # Concatenate segments – the junction node was already added as the
+        # last node of the previous segment, so skip seg_path[0].
+        if full_path:
+            full_path.extend(seg_path[1:])
+        else:
+            full_path.extend(seg_path)
+
+        total_cost += seg_cost
+
+        for j in range(len(seg_path) - 1):
+            path_edges.append([seg_path[j].file_path, seg_path[j + 1].file_path])
+
+    # Degenerate case: all stops resolved to the same node
+    if not full_path:
+        try:
+            full_path = [graph.get_song(req.start)]
+        except KeyError as exc:
+            return _orjson_response({"error": str(exc)}, status_code=404)
+
+    n = len(full_path)
+    hops = n - 1
+    summary = f"{n} track{'s' if n != 1 else ''} · {hops} hop{'s' if hops != 1 else ''}"
 
     return _orjson_response({
-        "path_nodes": path_node_ids,
+        "path_nodes": [s.file_path for s in full_path],
         "path_edges": path_edges,
-        "summary": "\n".join(lines),
+        "summary": summary,
         "total_cost": total_cost,
     })
 
