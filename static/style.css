@@ -692,6 +692,73 @@ aside label {
   background-color: #718096;
 }
 
+/* ---- Setlist interactive cards ---- */
+
+.path-flow-card--interactive {
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.path-flow-card--interactive:hover {
+  border-color: #718096;
+  background-color: #242c3a;
+}
+
+.path-flow-card--active {
+  border-color: #e53e3e !important;
+  background-color: #242c3a;
+}
+
+/* ---- Setlist neighbor picker ---- */
+
+.setlist-neighbor-picker {
+  background-color: #141a24;
+  border: 1px solid #e53e3e;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  overflow: hidden;
+  /* Connects visually to the active card above it */
+  margin-top: -1px;
+}
+
+.setlist-picker-label {
+  font-size: 10px;
+  color: #718096;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 6px 10px 4px;
+}
+
+.setlist-picker-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  cursor: pointer;
+  gap: 8px;
+  transition: background-color 0.1s;
+}
+
+.setlist-picker-row:hover {
+  background-color: #2d3748;
+}
+
+.setlist-picker-name {
+  font-size: 12px;
+  color: #e2e8f0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setlist-picker-meta {
+  font-size: 11px;
+  color: #718096;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* ---- Sigma container ---- */
 
 #sigma-container {

@@ -1065,6 +1065,11 @@ function clearHighlights() {
 // 8. Create Setlist
 // =========================================================================
 
+// Mutable setlist state (updated when user swaps songs)
+var setlistNodes = [];
+var activeSetlistIndex = -1;
+var currentSetlistSummary = "";
+
 /** Apply graph highlights from a path result (shared with pathfinding). */
 function applyPathHighlights(pathNodes, pathEdges) {
   highlightedNodes.clear();
@@ -1122,28 +1127,169 @@ document.getElementById("generate-setlist-btn").addEventListener("click", async 
       return;
     }
 
+    // Store mutable setlist state
+    setlistNodes = result.path_nodes.slice();
+    currentSetlistSummary = result.summary;
+    activeSetlistIndex = -1;
+
     // Highlight the generated setlist on the graph
     applyPathHighlights(result.path_nodes, result.path_edges);
 
-    // Render: summary + save button, then track flow
-    var html = '<div class="setlist-result-header">';
-    html += '<span class="setlist-summary">' + escapeHtml(result.summary) + '</span>';
-    html += '<button class="save-setlist-btn" id="save-setlist-btn">Save Setlist</button>';
-    html += '</div>';
-    html += renderPathFlowHtml(result.path_nodes);
-    outputEl.innerHTML = html;
-
-    // Save button: placeholder only — no backend yet
-    document.getElementById("save-setlist-btn").addEventListener("click", function () {
-      this.textContent = "Saved \u2713";
-      this.disabled = true;
-    });
+    // Render: summary + save button, then interactive track flow
+    renderSetlistOutput();
   } catch (err) {
     outputEl.innerHTML = '<p class="output-msg">Request failed: ' + escapeHtml(err.message) + '</p>';
   } finally {
     btn.disabled = false;
   }
 });
+
+/** (Re-)render the full setlist output using the current setlistNodes array. */
+function renderSetlistOutput() {
+  var outputEl = document.getElementById("setlist-output");
+  outputEl.innerHTML = "";
+
+  // Header: summary + save button
+  var header = document.createElement("div");
+  header.className = "setlist-result-header";
+
+  var summaryEl = document.createElement("span");
+  summaryEl.className = "setlist-summary";
+  summaryEl.textContent = currentSetlistSummary;
+  header.appendChild(summaryEl);
+
+  var saveBtn = document.createElement("button");
+  saveBtn.className = "save-setlist-btn";
+  saveBtn.textContent = "Save Setlist";
+  saveBtn.addEventListener("click", function () {
+    saveBtn.textContent = "Saved \u2713";
+    saveBtn.disabled = true;
+  });
+  header.appendChild(saveBtn);
+
+  outputEl.appendChild(header);
+  outputEl.appendChild(buildSetlistFlow(setlistNodes));
+}
+
+/** Build the DOM for the setlist path-flow with interactive (clickable) cards. */
+function buildSetlistFlow(pathNodes) {
+  var flow = document.createElement("div");
+  flow.className = "path-flow";
+
+  pathNodes.forEach(function (nid, i) {
+    var label = graphInstance.hasNode(nid) ? graphInstance.getNodeAttribute(nid, "label") : nid;
+    var bpm   = graphInstance.hasNode(nid) ? graphInstance.getNodeAttribute(nid, "bpm")   : "";
+    var key   = graphInstance.hasNode(nid) ? graphInstance.getNodeAttribute(nid, "key")   : "";
+
+    var card = document.createElement("div");
+    card.className = "path-flow-card path-flow-card--interactive";
+    if (i === activeSetlistIndex) card.classList.add("path-flow-card--active");
+    card.dataset.index = String(i);
+
+    var titleEl = document.createElement("div");
+    titleEl.className = "path-flow-card-title";
+    titleEl.textContent = label;
+    card.appendChild(titleEl);
+
+    if (bpm || key) {
+      var metaEl = document.createElement("div");
+      metaEl.className = "path-flow-card-meta";
+      if (bpm) { var s1 = document.createElement("span"); s1.textContent = "BPM: " + bpm; metaEl.appendChild(s1); }
+      if (key) { var s2 = document.createElement("span"); s2.textContent = "Key: " + key; metaEl.appendChild(s2); }
+      card.appendChild(metaEl);
+    }
+
+    var capturedIndex = i;
+    var capturedNodeId = nid;
+    card.addEventListener("click", function () {
+      onSetlistCardClick(capturedIndex, capturedNodeId, flow);
+    });
+
+    flow.appendChild(card);
+
+    // Inline neighbor picker (shown when this card is active)
+    if (i === activeSetlistIndex) {
+      var picker = document.createElement("div");
+      picker.className = "setlist-neighbor-picker";
+      picker.innerHTML = '<p class="output-msg" style="margin:6px 8px">Loading alternatives\u2026</p>';
+      flow.appendChild(picker);
+      // Fetch and populate asynchronously
+      populateSetlistPicker(picker, capturedNodeId, capturedIndex);
+    }
+
+    if (i < pathNodes.length - 1) {
+      var arrow = document.createElement("div");
+      arrow.className = "path-flow-arrow";
+      arrow.textContent = "\u2193";
+      flow.appendChild(arrow);
+    }
+  });
+
+  return flow;
+}
+
+/** Fetch neighbors and populate the picker panel. */
+async function populateSetlistPicker(pickerEl, nodeId, index) {
+  try {
+    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId) + "?k=8");
+    var data = await resp.json();
+
+    if (data.error || !data.neighbors || data.neighbors.length === 0) {
+      pickerEl.innerHTML = '<p class="output-msg" style="margin:6px 8px">No alternatives found.</p>';
+      return;
+    }
+
+    pickerEl.innerHTML = '<div class="setlist-picker-label">Replace with:</div>';
+
+    data.neighbors.forEach(function (nbr) {
+      var row = document.createElement("div");
+      row.className = "setlist-picker-row";
+
+      var nameEl = document.createElement("span");
+      nameEl.className = "setlist-picker-name";
+      nameEl.textContent = nbr.label;
+
+      var metaEl = document.createElement("span");
+      metaEl.className = "setlist-picker-meta";
+      metaEl.textContent = String(nbr.bpm) + " BPM \u00B7 " + nbr.key;
+
+      row.appendChild(nameEl);
+      row.appendChild(metaEl);
+
+      row.addEventListener("click", function () {
+        replaceSetlistSong(index, nbr.id);
+      });
+
+      pickerEl.appendChild(row);
+    });
+  } catch (_err) {
+    pickerEl.innerHTML = '<p class="output-msg" style="margin:6px 8px">Failed to load alternatives.</p>';
+  }
+}
+
+/** Toggle the neighbor picker for the card at the given index. */
+function onSetlistCardClick(index, nodeId, flow) {
+  if (activeSetlistIndex === index) {
+    // Second click: collapse
+    activeSetlistIndex = -1;
+  } else {
+    activeSetlistIndex = index;
+  }
+  // Re-render the flow in place (preserves header)
+  var outputEl = document.getElementById("setlist-output");
+  var oldFlow = outputEl.querySelector(".path-flow");
+  var newFlow = buildSetlistFlow(setlistNodes);
+  outputEl.replaceChild(newFlow, oldFlow);
+}
+
+/** Swap one song in the setlist and re-render. */
+function replaceSetlistSong(index, newNodeId) {
+  setlistNodes[index] = newNodeId;
+  activeSetlistIndex = -1;
+  renderSetlistOutput();
+  // Highlight nodes only — edges may not align after manual swap
+  applyPathHighlights(setlistNodes, []);
+}
 
 // =========================================================================
 // 9. Tab navigation
