@@ -19,8 +19,8 @@
 // =========================================================================
 
 var EDGE_COLORS = {
-  direct:  { path: "#e53e3e", hover: "#718096" },
-  double:  { path: "#48bb78", hover: "#276749" },
+  direct:  { path: "#48bb78", hover: "#276749" },
+  double:  { path: "#e53e3e", hover: "#718096" },
   triplet: { path: "#4299e1", hover: "#2b6cb0" },
 };
 
@@ -249,7 +249,7 @@ function buildGraphology(graphData) {
       y: n.y,
       label: n.label,
       size: 2,
-      color: "#6c7a89",
+      color: "#4A4A4A",
       bpm: n.bpm,
       key: n.key,
       directory: nodeDirectory(n.id, base),
@@ -313,7 +313,7 @@ async function loadGraph() {
     var bgH = size + padY * 2;
     var radius = 3;
 
-    context.fillStyle = "rgba(26, 32, 44, 0.85)";
+    context.fillStyle = "rgba(30, 30, 30, 0.85)";
     context.beginPath();
     context.moveTo(bgX + radius, bgY);
     context.lineTo(bgX + bgW - radius, bgY);
@@ -337,9 +337,9 @@ async function loadGraph() {
   sigmaInstance = new Sigma(graphInstance, container, {
     renderEdgeLabels: false,
     enableEdgeEvents: false,
-    defaultNodeColor: "#6c7a89",
-    defaultEdgeColor: "#cbd5e0",
-    labelColor: { color: "#e2e8f0" },
+    defaultNodeColor: "#4A4A4A",
+    defaultEdgeColor: "#333333",
+    labelColor: { color: "#4A4A4A" },
     labelFont: "Segoe UI, Roboto, sans-serif",
     labelSize: 12,
     labelRenderedSizeThreshold: 100,
@@ -374,15 +374,13 @@ async function loadGraph() {
 
 
 function nodeReducer(node, data) {
-  // Directory filter: hide nodes not in active directories
   if (activeDirectories !== null) {
     var nodeDir = data.directory || ".";
     if (!isDirectoryActive(nodeDir)) {
-      return { x: data.x, y: data.y, hidden: true, color: "#4a5568", size: 0, label: null, zIndex: 0 };
+      return { x: data.x, y: data.y, hidden: true, color: "#2D2D2D", size: 0, label: null, zIndex: 0 };
     }
   }
 
-  // Fast path: nothing active — return data as-is (zero allocation)
   if (highlightedNodes.size === 0 && hoveredNode === null && detailNode === null) {
     return data;
   }
@@ -392,18 +390,16 @@ function nodeReducer(node, data) {
   var isHighlighted = highlightedNodes.has(node);
   var isDetail = detailNode !== null && node === detailNode;
 
-  // Dim path: node is not involved in any active state
   if (highlightedNodes.size > 0 && !isHighlighted && !isHovered && !isNeighbor && !isDetail) {
-    return { x: data.x, y: data.y, color: "#4a5568", size: 1.5, label: null, zIndex: 0 };
+    return { x: data.x, y: data.y, color: "#2D2D2D", size: 1.5, label: null, zIndex: 0 };
   }
 
-  // Only remaining: nodes that actually need modification
   if (!isHighlighted && !isHovered && !isNeighbor && !isDetail) return data;
 
   var res = Object.assign({}, data);
 
   if (highlightedNodes.size > 0 && isHighlighted) {
-    res.color = "#e53e3e";
+    res.color = "#39FF14";
     res.size = 4;
     res.zIndex = 2;
     res.label = data.label;
@@ -411,7 +407,7 @@ function nodeReducer(node, data) {
   }
 
   if (isDetail) {
-    res.color = "#f6ad55";
+    res.color = "#39FF14";
     res.size = 4;
     res.zIndex = 2;
     res.label = data.label;
@@ -419,14 +415,14 @@ function nodeReducer(node, data) {
   }
 
   if (isHovered) {
-    res.color = "#fc8181";
+    res.color = "#39FF14";
     res.size = 5;
     res.label = data.label;
-    res.labelColor = "#ffffff";
+    res.labelColor = "#4A4A4A";
     res.zIndex = 3;
     res.forceLabel = true;
   } else if (isNeighbor) {
-    res.color = res.color === "#e53e3e" ? "#e53e3e" : "#a0aec0";
+    res.color = res.color === "#39FF14" ? "#39FF14" : "#9CA3AF";
     res.size = res.size > 2 ? res.size : 2.5;
   }
 

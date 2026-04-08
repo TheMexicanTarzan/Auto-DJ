@@ -7,7 +7,6 @@
 #   brew install ffmpeg            # macOS
 # NOTE: If pip install fails, try:  conda install -c mtgdb essentia
 # or use the pre-built wheels:  pip install essentia==2.1b6.dev1184
-essentia>=2.1b6
 
 # ML embeddings (CLAP model)
 transformers>=4.30.0
