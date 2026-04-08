@@ -489,6 +489,73 @@ def api_path(req: PathRequest):
     })
 
 
+class SetlistRequest(BaseModel):
+    min_bpm: float = 0.0
+    max_bpm: float = 999.0
+    target_duration_min: float = 60.0   # desired total set length in minutes
+    starting_key: str | None = None     # key of the first track (optional)
+    set_key: str | None = None          # key constraint for all tracks (optional)
+    allowed_types: list[str] | None = None
+
+
+@app.post("/api/setlist")
+def api_setlist(req: SetlistRequest):
+    """Generate a randomised continuous setlist matching the given criteria."""
+    graph = _get_graph()
+    if graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
+
+    if req.min_bpm > req.max_bpm:
+        return _orjson_response(
+            {"error": "min_bpm must be ≤ max_bpm."}, status_code=400
+        )
+
+    target_sec = req.target_duration_min * 60.0
+    allowed = set(req.allowed_types) if req.allowed_types else None
+
+    try:
+        songs = graph.generate_setlist(
+            min_bpm=req.min_bpm,
+            max_bpm=req.max_bpm,
+            target_sec=target_sec,
+            starting_key=req.starting_key or None,
+            set_key=req.set_key or None,
+            allowed_types=allowed,
+        )
+    except ValueError as exc:
+        return _orjson_response({"error": str(exc)}, status_code=400)
+
+    # Build path_edges for graph highlighting (consecutive pairs only)
+    path_edges: list = []
+    for i in range(len(songs) - 1):
+        a_id, b_id = songs[i].file_path, songs[i + 1].file_path
+        try:
+            va = graph.graph.vs.find(name=a_id)
+            vb = graph.graph.vs.find(name=b_id)
+            eid = graph.graph.get_eid(va.index, vb.index, directed=False, error=False)
+            if eid >= 0:
+                path_edges.append([a_id, b_id])
+        except Exception:
+            pass
+
+    _FALLBACK = 210.0
+    total_sec = sum(
+        s.duration_sec if s.duration_sec > 0 else _FALLBACK for s in songs
+    )
+    total_min = total_sec / 60.0
+    n = len(songs)
+    summary = (
+        f"{n} track{'s' if n != 1 else ''}"
+        f" \u00B7 ~{total_min:.0f} min"
+    )
+
+    return _orjson_response({
+        "path_nodes": [s.file_path for s in songs],
+        "path_edges": path_edges,
+        "summary": summary,
+    })
+
+
 @app.get("/api/neighbors/{node_id:path}")
 def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K, types: str | None = None):
     """Return a node's metadata and its top-K nearest neighbours."""

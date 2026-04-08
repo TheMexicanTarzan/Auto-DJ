@@ -132,16 +132,19 @@ aside label {
 
 .tab-btn {
   flex: 1;
-  padding: 12px 4px;
+  padding: 11px 2px;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
   margin-bottom: -2px;
   color: #a0aec0;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 11px;
   font-family: inherit;
   transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tab-btn:hover {
@@ -573,6 +576,120 @@ aside label {
   font-size: 13px;
   font-style: italic;
   padding: 8px 0;
+}
+
+/* ---- Create Setlist form ---- */
+
+.setlist-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.sl-row {
+  display: flex;
+  gap: 10px;
+}
+
+.sl-row .sl-field {
+  flex: 1;
+}
+
+.sl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sl-field label {
+  font-size: 12px;
+  color: #a0aec0;
+  margin-bottom: 0;
+}
+
+.sl-field input[type="number"],
+.sl-field select {
+  width: 100%;
+  padding: 8px 10px;
+  background-color: #4a5568;
+  color: #e2e8f0;
+  border: 1px solid #4a5568;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.sl-field input[type="number"]:focus,
+.sl-field select:focus {
+  border-color: #e53e3e;
+}
+
+.sl-field select option {
+  background-color: #2d3748;
+}
+
+#generate-setlist-btn {
+  width: 100%;
+  padding: 10px;
+  background-color: #e53e3e;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: bold;
+  font-family: inherit;
+  transition: background-color 0.15s;
+}
+
+#generate-setlist-btn:hover {
+  background-color: #c53030;
+}
+
+#generate-setlist-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---- Setlist output ---- */
+
+#setlist-output {
+  font-size: 13px;
+  color: #e2e8f0;
+}
+
+.setlist-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.setlist-summary {
+  color: #a0aec0;
+  font-size: 13px;
+}
+
+.save-setlist-btn {
+  flex-shrink: 0;
+  padding: 5px 12px;
+  background-color: #4a5568;
+  color: #e2e8f0;
+  border: 1px solid #718096;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background-color 0.15s;
+}
+
+.save-setlist-btn:hover {
+  background-color: #718096;
 }
 
 /* ---- Sigma container ---- */

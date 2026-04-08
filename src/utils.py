@@ -197,6 +197,7 @@ def scan_directory(
                 downbeat_times=analysis.downbeat_times,
                 content_hash=path_to_hash.get(Path(analysis.file_path), ""),
                 fingerprint=analysis.fingerprint,
+                duration_sec=analysis.duration_sec,
             ))
 
     # --- Phase 3: fingerprint-based deduplication ---
@@ -342,6 +343,7 @@ def analyse_new_songs(
                 downbeat_times=analysis.downbeat_times,
                 content_hash=path_to_hash.get(Path(analysis.file_path), ""),
                 fingerprint=analysis.fingerprint,
+                duration_sec=analysis.duration_sec,
             ))
 
     # Fingerprint dedup against existing graph songs

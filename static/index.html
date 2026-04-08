@@ -31,6 +31,7 @@
       <div class="tab-nav">
         <button class="tab-btn active" data-tab="track-details">Track Details</button>
         <button class="tab-btn" data-tab="pathfinding">Pathfinding</button>
+        <button class="tab-btn" data-tab="create-setlist">Create Setlist</button>
         <button class="tab-btn" data-tab="settings">Settings</button>
       </div>
 
@@ -70,7 +71,102 @@
         <div id="path-output"><p class="output-msg">Select songs and click Find Path.</p></div>
       </div>
 
-      <!-- Tab 3: Settings -->
+      <!-- Tab 3: Create Setlist -->
+      <div class="tab-panel" id="tab-create-setlist">
+
+        <div class="setlist-form">
+
+          <!-- BPM Range -->
+          <div class="sl-row">
+            <div class="sl-field">
+              <label for="sl-min-bpm">Min BPM</label>
+              <input type="number" id="sl-min-bpm" placeholder="e.g. 120" min="0" max="300" step="1">
+            </div>
+            <div class="sl-field">
+              <label for="sl-max-bpm">Max BPM</label>
+              <input type="number" id="sl-max-bpm" placeholder="e.g. 140" min="0" max="300" step="1">
+            </div>
+          </div>
+
+          <!-- Target Duration -->
+          <div class="sl-field">
+            <label for="sl-target-duration">Target Duration (minutes)</label>
+            <input type="number" id="sl-target-duration" value="60" min="1" step="1">
+          </div>
+
+          <!-- Starting Key -->
+          <div class="sl-field">
+            <label for="sl-starting-key">Starting Key (optional)</label>
+            <select id="sl-starting-key">
+              <option value="">Any key</option>
+              <option value="C major">C major</option>
+              <option value="C# major">C# major</option>
+              <option value="D major">D major</option>
+              <option value="D# major">D# major</option>
+              <option value="E major">E major</option>
+              <option value="F major">F major</option>
+              <option value="F# major">F# major</option>
+              <option value="G major">G major</option>
+              <option value="G# major">G# major</option>
+              <option value="A major">A major</option>
+              <option value="A# major">A# major</option>
+              <option value="B major">B major</option>
+              <option value="C minor">C minor</option>
+              <option value="C# minor">C# minor</option>
+              <option value="D minor">D minor</option>
+              <option value="D# minor">D# minor</option>
+              <option value="E minor">E minor</option>
+              <option value="F minor">F minor</option>
+              <option value="F# minor">F# minor</option>
+              <option value="G minor">G minor</option>
+              <option value="G# minor">G# minor</option>
+              <option value="A minor">A minor</option>
+              <option value="A# minor">A# minor</option>
+              <option value="B minor">B minor</option>
+            </select>
+          </div>
+
+          <!-- Set Key -->
+          <div class="sl-field">
+            <label for="sl-set-key">Set Key (optional)</label>
+            <select id="sl-set-key">
+              <option value="">Any key</option>
+              <option value="C major">C major</option>
+              <option value="C# major">C# major</option>
+              <option value="D major">D major</option>
+              <option value="D# major">D# major</option>
+              <option value="E major">E major</option>
+              <option value="F major">F major</option>
+              <option value="F# major">F# major</option>
+              <option value="G major">G major</option>
+              <option value="G# major">G# major</option>
+              <option value="A major">A major</option>
+              <option value="A# major">A# major</option>
+              <option value="B major">B major</option>
+              <option value="C minor">C minor</option>
+              <option value="C# minor">C# minor</option>
+              <option value="D minor">D minor</option>
+              <option value="D# minor">D# minor</option>
+              <option value="E minor">E minor</option>
+              <option value="F minor">F minor</option>
+              <option value="F# minor">F# minor</option>
+              <option value="G minor">G minor</option>
+              <option value="G# minor">G# minor</option>
+              <option value="A minor">A minor</option>
+              <option value="A# minor">A# minor</option>
+              <option value="B minor">B minor</option>
+            </select>
+          </div>
+
+          <button id="generate-setlist-btn">Generate Setlist</button>
+
+        </div>
+
+        <div id="setlist-output"></div>
+
+      </div>
+
+      <!-- Tab 4: Settings -->
       <div class="tab-panel" id="tab-settings">
 
         <!-- Section A: Directory Filter -->

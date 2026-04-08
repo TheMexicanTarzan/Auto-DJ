@@ -116,6 +116,41 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * Build the HTML string for a vertical path-flow from an array of node IDs.
+ * Shared by the Pathfinding and Create Setlist tabs.
+ */
+function renderPathFlowHtml(pathNodes) {
+  if (!pathNodes || pathNodes.length === 0) {
+    return '<p class="output-msg">No tracks found.</p>';
+  }
+  var html = '<div class="path-flow">';
+  pathNodes.forEach(function (nid, i) {
+    var label = graphInstance.hasNode(nid)
+      ? graphInstance.getNodeAttribute(nid, "label") : nid;
+    var bpm = graphInstance.hasNode(nid)
+      ? graphInstance.getNodeAttribute(nid, "bpm") : "";
+    var key = graphInstance.hasNode(nid)
+      ? graphInstance.getNodeAttribute(nid, "key") : "";
+
+    html += '<div class="path-flow-card">';
+    html += '<div class="path-flow-card-title">' + escapeHtml(label) + '</div>';
+    if (bpm || key) {
+      html += '<div class="path-flow-card-meta">';
+      if (bpm) html += '<span>BPM: ' + escapeHtml(String(bpm)) + '</span>';
+      if (key) html += '<span>Key: ' + escapeHtml(String(key)) + '</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+
+    if (i < pathNodes.length - 1) {
+      html += '<div class="path-flow-arrow">\u2193</div>';
+    }
+  });
+  html += '</div>';
+  return html;
+}
+
 // =========================================================================
 // 1. Progress polling
 // =========================================================================
@@ -1007,36 +1042,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
     sigmaInstance.refresh();
 
     // Render path as a vertical flow of track cards with arrows between them
-    if (!result.path_nodes || result.path_nodes.length === 0) {
-      outputEl.innerHTML = '<p class="output-msg">No path found.</p>';
-      return;
-    }
-
-    var html = '<div class="path-flow">';
-    result.path_nodes.forEach(function (nid, i) {
-      var label = graphInstance.hasNode(nid)
-        ? graphInstance.getNodeAttribute(nid, "label") : nid;
-      var bpm = graphInstance.hasNode(nid)
-        ? graphInstance.getNodeAttribute(nid, "bpm") : "";
-      var key = graphInstance.hasNode(nid)
-        ? graphInstance.getNodeAttribute(nid, "key") : "";
-
-      html += '<div class="path-flow-card">';
-      html += '<div class="path-flow-card-title">' + escapeHtml(label) + '</div>';
-      if (bpm || key) {
-        html += '<div class="path-flow-card-meta">';
-        if (bpm) html += '<span>BPM: ' + escapeHtml(String(bpm)) + '</span>';
-        if (key) html += '<span>Key: ' + escapeHtml(String(key)) + '</span>';
-        html += '</div>';
-      }
-      html += '</div>';
-
-      if (i < result.path_nodes.length - 1) {
-        html += '<div class="path-flow-arrow">\u2193</div>'; // ↓
-      }
-    });
-    html += '</div>';
-    outputEl.innerHTML = html;
+    outputEl.innerHTML = renderPathFlowHtml(result.path_nodes);
   } catch (err) {
     outputEl.innerHTML = '<p class="output-msg">Request failed: ' + escapeHtml(err.message) + '</p>';
   } finally {
@@ -1056,7 +1062,91 @@ function clearHighlights() {
 
 
 // =========================================================================
-// 8. Tab navigation
+// 8. Create Setlist
+// =========================================================================
+
+/** Apply graph highlights from a path result (shared with pathfinding). */
+function applyPathHighlights(pathNodes, pathEdges) {
+  highlightedNodes.clear();
+  highlightedEdges.clear();
+
+  pathNodes.forEach(function (nid) {
+    if (graphInstance.hasNode(nid)) highlightedNodes.add(nid);
+  });
+  pathEdges.forEach(function (pair) {
+    if (graphInstance.hasNode(pair[0]) && graphInstance.hasNode(pair[1])) {
+      var ek = graphInstance.edge(pair[0], pair[1]);
+      if (ek != null) highlightedEdges.add(ek);
+    }
+  });
+
+  syncZIndex();
+  sigmaInstance.refresh();
+}
+
+document.getElementById("generate-setlist-btn").addEventListener("click", async function () {
+  var outputEl = document.getElementById("setlist-output");
+  var btn = document.getElementById("generate-setlist-btn");
+
+  var minBpm = parseFloat(document.getElementById("sl-min-bpm").value);
+  var maxBpm = parseFloat(document.getElementById("sl-max-bpm").value);
+  var targetMin = parseFloat(document.getElementById("sl-target-duration").value) || 60;
+  var startingKey = document.getElementById("sl-starting-key").value || null;
+  var setKey = document.getElementById("sl-set-key").value || null;
+
+  // Basic client-side validation
+  if (!isNaN(minBpm) && !isNaN(maxBpm) && minBpm > maxBpm) {
+    outputEl.innerHTML = '<p class="output-msg">Min BPM must be \u2264 Max BPM.</p>';
+    return;
+  }
+
+  btn.disabled = true;
+  outputEl.innerHTML = '<p class="output-msg">Generating setlist\u2026</p>';
+
+  try {
+    var resp = await fetch("/api/setlist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        min_bpm: isNaN(minBpm) ? 0 : minBpm,
+        max_bpm: isNaN(maxBpm) ? 999 : maxBpm,
+        target_duration_min: targetMin,
+        starting_key: startingKey,
+        set_key: setKey,
+      }),
+    });
+    var result = await resp.json();
+
+    if (result.error) {
+      outputEl.innerHTML = '<p class="output-msg">' + escapeHtml(result.error) + '</p>';
+      return;
+    }
+
+    // Highlight the generated setlist on the graph
+    applyPathHighlights(result.path_nodes, result.path_edges);
+
+    // Render: summary + save button, then track flow
+    var html = '<div class="setlist-result-header">';
+    html += '<span class="setlist-summary">' + escapeHtml(result.summary) + '</span>';
+    html += '<button class="save-setlist-btn" id="save-setlist-btn">Save Setlist</button>';
+    html += '</div>';
+    html += renderPathFlowHtml(result.path_nodes);
+    outputEl.innerHTML = html;
+
+    // Save button: placeholder only — no backend yet
+    document.getElementById("save-setlist-btn").addEventListener("click", function () {
+      this.textContent = "Saved \u2713";
+      this.disabled = true;
+    });
+  } catch (err) {
+    outputEl.innerHTML = '<p class="output-msg">Request failed: ' + escapeHtml(err.message) + '</p>';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// =========================================================================
+// 9. Tab navigation
 // =========================================================================
 
 document.querySelectorAll(".tab-btn").forEach(function (btn) {
