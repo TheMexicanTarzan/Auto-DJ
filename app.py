@@ -34,6 +34,7 @@ from collections import defaultdict
 
 from src.config import CACHE_PATH, SONGS_DIRECTORY, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
+from src.setlist_saver import save_setlist
 from src.utils import analyse_new_songs, discover_changes, scan_directory
 
 # ---------------------------------------------------------------------------
@@ -590,6 +591,34 @@ def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K, types: str | None = Non
             }
             for nbr, cost, etype in top_k
         ],
+    })
+
+
+class SaveSetlistRequest(BaseModel):
+    setlist_name: str
+    track_paths: list[str]
+
+
+@app.post("/api/save_setlist")
+def api_save_setlist(req: SaveSetlistRequest):
+    """Open a folder-picker dialog and copy the setlist tracks into a numbered subfolder."""
+    if not req.track_paths:
+        return _orjson_response({"error": "No tracks provided."}, status_code=400)
+
+    try:
+        output_dir = save_setlist(req.track_paths, req.setlist_name)
+    except RuntimeError as exc:
+        # User cancelled the dialog
+        return _orjson_response({"error": str(exc)}, status_code=400)
+    except OSError as exc:
+        return _orjson_response(
+            {"error": f"Could not write files: {exc}"}, status_code=500
+        )
+
+    return _orjson_response({
+        "success": True,
+        "output_dir": output_dir,
+        "message": f"Saved to {output_dir}",
     })
 
 

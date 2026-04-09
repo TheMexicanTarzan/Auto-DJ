@@ -1065,6 +1065,7 @@ function clearHighlights() {
 var setlistNodes = [];
 var activeSetlistIndex = -1;
 var currentSetlistSummary = "";
+var currentSetlistName = "";
 
 /** Apply graph highlights from a path result (shared with pathfinding). */
 function applyPathHighlights(pathNodes, pathEdges) {
@@ -1126,6 +1127,7 @@ document.getElementById("generate-setlist-btn").addEventListener("click", async 
     // Store mutable setlist state
     setlistNodes = result.path_nodes.slice();
     currentSetlistSummary = result.summary;
+    currentSetlistName = "";
     activeSetlistIndex = -1;
 
     // Highlight the generated setlist on the graph
@@ -1145,6 +1147,20 @@ function renderSetlistOutput() {
   var outputEl = document.getElementById("setlist-output");
   outputEl.innerHTML = "";
 
+  // Setlist name input
+  var nameRow = document.createElement("div");
+  nameRow.className = "setlist-name-row";
+  var nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.className = "setlist-name-input";
+  nameInput.placeholder = "Setlist name\u2026";
+  nameInput.value = currentSetlistName;
+  nameInput.addEventListener("input", function () {
+    currentSetlistName = nameInput.value;
+  });
+  nameRow.appendChild(nameInput);
+  outputEl.appendChild(nameRow);
+
   // Header: summary + save button
   var header = document.createElement("div");
   header.className = "setlist-result-header";
@@ -1157,9 +1173,46 @@ function renderSetlistOutput() {
   var saveBtn = document.createElement("button");
   saveBtn.className = "save-setlist-btn";
   saveBtn.textContent = "Save Setlist";
-  saveBtn.addEventListener("click", function () {
-    saveBtn.textContent = "Saved \u2713";
+  saveBtn.addEventListener("click", async function () {
+    var name = nameInput.value.trim() || "My Setlist";
+    saveBtn.textContent = "Saving\u2026";
     saveBtn.disabled = true;
+
+    // Remove any previous error
+    var prevErr = outputEl.querySelector(".setlist-save-error");
+    if (prevErr) prevErr.remove();
+
+    try {
+      var resp = await fetch("/api/save_setlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          setlist_name: name,
+          track_paths: setlistNodes,
+        }),
+      });
+      var result = await resp.json();
+
+      if (result.error) {
+        saveBtn.textContent = "Save Setlist";
+        saveBtn.disabled = false;
+        var errEl = document.createElement("p");
+        errEl.className = "setlist-save-error";
+        errEl.textContent = result.error;
+        header.after(errEl);
+      } else {
+        saveBtn.textContent = "Saved \u2713";
+        saveBtn.classList.add("save-setlist-btn--saved");
+        // stays disabled
+      }
+    } catch (err) {
+      saveBtn.textContent = "Save Setlist";
+      saveBtn.disabled = false;
+      var errEl = document.createElement("p");
+      errEl.className = "setlist-save-error";
+      errEl.textContent = "Request failed: " + err.message;
+      header.after(errEl);
+    }
   });
   header.appendChild(saveBtn);
 
