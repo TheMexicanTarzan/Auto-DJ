@@ -357,11 +357,16 @@ aside label {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   padding: 3px 0;
-  color: #39FF14; /* Arrow indicators match the accent color */
+  color: #39FF14;
   font-size: 14px;
   line-height: 1;
   user-select: none;
+}
+
+.path-flow-arrow .edge-badge {
+  margin-left: 0;
 }
 
 /* ---- Settings tab sub-sections ---- */
@@ -559,6 +564,11 @@ aside label {
   font-weight: 500;
   margin-left: 4px;
   vertical-align: middle;
+}
+
+.edge-badge--direct {
+  background-color: #2D2D2D;
+  color: #9CA3AF;
 }
 
 .edge-badge--double {

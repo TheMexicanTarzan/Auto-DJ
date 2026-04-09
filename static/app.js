@@ -144,7 +144,14 @@ function renderPathFlowHtml(pathNodes) {
     html += '</div>';
 
     if (i < pathNodes.length - 1) {
-      html += '<div class="path-flow-arrow">\u2193</div>';
+      var nextNid = pathNodes[i + 1];
+      var edgeType = "direct";
+      if (graphInstance.hasNode(nid) && graphInstance.hasNode(nextNid)) {
+        var ek = graphInstance.edge(nid, nextNid);
+        if (ek != null) edgeType = graphInstance.getEdgeAttribute(ek, "edge_type") || "direct";
+      }
+      html += '<div class="path-flow-arrow">\u2193 <span class="edge-badge edge-badge--'
+        + escapeHtml(edgeType) + '">' + escapeHtml(edgeType) + '</span></div>';
     }
   });
   html += '</div>';
@@ -1115,6 +1122,7 @@ document.getElementById("generate-setlist-btn").addEventListener("click", async 
         target_duration_min: targetMin,
         starting_key: startingKey,
         set_key: setKey,
+        allowed_types: getAllowedTypes(),
       }),
     });
     var result = await resp.json();
@@ -1267,9 +1275,19 @@ function buildSetlistFlow(pathNodes) {
     }
 
     if (i < pathNodes.length - 1) {
+      var nextNid = pathNodes[i + 1];
+      var edgeType = "direct";
+      if (graphInstance.hasNode(nid) && graphInstance.hasNode(nextNid)) {
+        var ek = graphInstance.edge(nid, nextNid);
+        if (ek != null) edgeType = graphInstance.getEdgeAttribute(ek, "edge_type") || "direct";
+      }
       var arrow = document.createElement("div");
       arrow.className = "path-flow-arrow";
-      arrow.textContent = "\u2193";
+      var badge = document.createElement("span");
+      badge.className = "edge-badge edge-badge--" + edgeType;
+      badge.textContent = edgeType;
+      arrow.appendChild(document.createTextNode("\u2193"));
+      arrow.appendChild(badge);
       flow.appendChild(arrow);
     }
   });
