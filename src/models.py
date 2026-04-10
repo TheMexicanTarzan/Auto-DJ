@@ -62,7 +62,7 @@ def _get_clap_model():
         import torch
         from transformers import ClapModel, ClapProcessor
 
-        local_path = str(Path(__file__).resolve().parent / "clap")
+        local_path = str(Path(__file__).resolve().parent / "mert")
         logger.info("Loading CLAP model from '%s' (this only happens once)...", local_path)
         _clap_processor = ClapProcessor.from_pretrained(local_path)
         _clap_model = ClapModel.from_pretrained(local_path)
@@ -318,7 +318,7 @@ def compute_embeddings_batch(
     for i in range(0, len(resampled), batch_size):
         batch = resampled[i : i + batch_size]
         inputs = processor(
-            audio=batch,
+            audios=batch,
             sampling_rate=target_sr,
             return_tensors="pt",
             padding=True,
