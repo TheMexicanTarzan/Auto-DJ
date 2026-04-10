@@ -337,6 +337,7 @@ def compute_embeddings_batch(
             chunks = [y]
 
         chunk_embs: list[np.ndarray] = []
+        chunk_lengths: list[int] = []
         for chunk in chunks:
             inputs = processor(
                 chunk,
@@ -352,9 +353,12 @@ def compute_embeddings_batch(
                 out = model(**inputs)
             # Mean-pool over the time axis → (hidden_dim,)
             chunk_embs.append(out.last_hidden_state.mean(dim=1).squeeze().cpu().float().numpy())
+            chunk_lengths.append(len(chunk))
 
-        # Average all chunk embeddings → single song embedding
-        embeddings.append(np.mean(chunk_embs, axis=0))
+        # Weighted average — longer chunks contribute proportionally more.
+        weights = np.array(chunk_lengths, dtype=np.float64)
+        weights /= weights.sum()
+        embeddings.append(np.average(chunk_embs, axis=0, weights=weights))
 
     return embeddings
 
@@ -488,6 +492,7 @@ class Song:
             chunks = [y]
 
         chunk_embs: list[np.ndarray] = []
+        chunk_lengths: list[int] = []
         for chunk in chunks:
             inputs = processor(chunk, sampling_rate=target_sr, return_tensors="pt")
             inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
@@ -497,9 +502,12 @@ class Song:
             with torch.no_grad():
                 out = model(**inputs)
             chunk_embs.append(out.last_hidden_state.mean(dim=1).squeeze().cpu().float().numpy())
+            chunk_lengths.append(len(chunk))
 
-        # Average chunk embeddings → single 1-D embedding for the song.
-        return np.mean(chunk_embs, axis=0)
+        # Weighted average — longer chunks contribute proportionally more.
+        weights = np.array(chunk_lengths, dtype=np.float64)
+        weights /= weights.sum()
+        return np.average(chunk_embs, axis=0, weights=weights)
 
     # ------------------------------------------------------------------
     # Readable representation
