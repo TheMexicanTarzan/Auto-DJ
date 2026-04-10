@@ -51,7 +51,7 @@ _clap_device = None
 
 
 def _get_clap_model():
-    """Lazy-load the CLAP model and processor on first use.
+    """Lazy-load the MERT model and feature extractor on first use.
 
     When a CUDA-capable GPU is available the model is moved to it
     automatically, giving a significant speed-up for embedding inference.
@@ -60,17 +60,19 @@ def _get_clap_model():
 
     if _clap_model is None:
         import torch
-        from transformers import ClapModel, ClapProcessor
+        from transformers import AutoFeatureExtractor, AutoModel
 
         local_path = str(Path(__file__).resolve().parent / "mert")
-        logger.info("Loading CLAP model from '%s' (this only happens once)...", local_path)
-        _clap_processor = ClapProcessor.from_pretrained(local_path)
-        _clap_model = ClapModel.from_pretrained(local_path)
+        logger.info("Loading MERT model from '%s' (this only happens once)...", local_path)
+        _clap_processor = AutoFeatureExtractor.from_pretrained(
+            local_path, trust_remote_code=True
+        )
+        _clap_model = AutoModel.from_pretrained(local_path, trust_remote_code=True)
         _clap_model.eval()  # inference mode — no gradient tracking needed
 
         _clap_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         _clap_model.to(_clap_device)
-        logger.info("CLAP model loaded on device: %s", _clap_device)
+        logger.info("MERT model loaded on device: %s", _clap_device)
 
     return _clap_model, _clap_processor
 
@@ -301,9 +303,9 @@ def compute_embeddings_batch(
     import torch
 
     model, processor = _get_clap_model()
-    target_sr = 48_000
+    target_sr = 24_000  # MERT was trained at 24 kHz
 
-    # Resample all audio to 48 kHz in parallel.  Essentia's C++ Resample
+    # Resample all audio to 24 kHz in parallel.  Essentia's C++ Resample
     # releases the GIL, so threads genuinely run concurrently.  Order is
     # preserved by ThreadPoolExecutor.map().
     def _resample_one(args: tuple[np.ndarray, int]) -> np.ndarray:
@@ -318,20 +320,18 @@ def compute_embeddings_batch(
     for i in range(0, len(resampled), batch_size):
         batch = resampled[i : i + batch_size]
         inputs = processor(
-            audios=batch,
+            batch,
             sampling_rate=target_sr,
             return_tensors="pt",
             padding=True,
         )
         inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
         with torch.no_grad():
-            outputs = model.get_audio_features(**inputs)
+            outputs = model(**inputs)
 
-        if hasattr(outputs, "pooler_output"):
-            outputs = outputs.pooler_output
-
-        # outputs shape: (batch, 512) — split into individual vectors
-        batch_embs = outputs.cpu().numpy()
+        # MERT returns last_hidden_state (batch, time_steps, hidden_dim);
+        # mean-pool over the time axis to get a fixed-size embedding per track.
+        batch_embs = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
         for j in range(batch_embs.shape[0]):
             embeddings.append(batch_embs[j])
 
@@ -442,33 +442,29 @@ class Song:
     def _compute_embedding(y: np.ndarray, sr: int) -> np.ndarray:
         """
         Generate a fixed-size semantic embedding for the audio signal
-        using the CLAP (Contrastive Language–Audio Pretraining) model.
+        using the MERT model.
 
-        The CLAP model expects audio at 48 kHz, so we resample if needed.
-        Returns a 1-D numpy array (typically 512 dimensions).
+        MERT expects audio at 24 kHz, so we resample if needed.
+        Returns a 1-D numpy array (hidden_dim dimensions, typically 768).
         """
         import torch
 
         model, processor = _get_clap_model()
 
-        # CLAP expects 48 kHz input
-        target_sr = 48_000
+        # MERT expects 24 kHz input
+        target_sr = 24_000
         if sr != target_sr:
             y = _resample(y, orig_sr=sr, target_sr=target_sr)
 
         # Prepare inputs and run inference (no gradients needed)
-        inputs = processor(audio=y, sampling_rate=target_sr, return_tensors="pt")
+        inputs = processor(y, sampling_rate=target_sr, return_tensors="pt")
         inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
         with torch.no_grad():
-            outputs = model.get_audio_features(**inputs)
+            outputs = model(**inputs)
 
-        # Newer transformers return a BaseModelOutputWithPooling instead of
-        # a raw tensor.  Extract the projected embedding in that case.
-        if hasattr(outputs, "pooler_output"):
-            outputs = outputs.pooler_output
-
-        # Flatten to a plain 1-D numpy vector
-        return outputs.squeeze().cpu().numpy()
+        # MERT returns last_hidden_state (1, time_steps, hidden_dim);
+        # mean-pool over the time axis then flatten to a 1-D vector.
+        return outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
 
     # ------------------------------------------------------------------
     # Readable representation
