@@ -224,21 +224,21 @@ def scan_directory(
             audio_list = [(a.audio, a.sr) for a in chunk_analyses]
             embeddings = compute_embeddings_batch(audio_list, batch_size=_CHUNK_SIZE)
 
-        # 2c. Build Song objects — raw audio is released when
-        #     chunk_analyses goes out of scope at next iteration.
-        for analysis, embedding in zip(chunk_analyses, embeddings):
-            songs.append(Song(
-                file_path=analysis.file_path,
-                filename=analysis.filename,
-                bpm=analysis.bpm,
-                key=analysis.key,
-                embedding=embedding,
-                beat_times=analysis.beat_times,
-                downbeat_times=analysis.downbeat_times,
-                content_hash=path_to_hash.get(Path(analysis.file_path), ""),
-                fingerprint=analysis.fingerprint,
-                duration_sec=analysis.duration_sec,
-            ))
+            # 2c. Build Song objects — raw audio is released when
+            #     chunk_analyses goes out of scope at next iteration.
+            for analysis, embedding in zip(chunk_analyses, embeddings):
+                songs.append(Song(
+                    file_path=analysis.file_path,
+                    filename=analysis.filename,
+                    bpm=analysis.bpm,
+                    key=analysis.key,
+                    embedding=embedding,
+                    beat_times=analysis.beat_times,
+                    downbeat_times=analysis.downbeat_times,
+                    content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+                    fingerprint=analysis.fingerprint,
+                    duration_sec=analysis.duration_sec,
+                ))
 
     # --- Phase 3: fingerprint-based deduplication ---
     # Catches cross-format / cross-album duplicates that SHA-256 misses
@@ -385,19 +385,19 @@ def analyse_new_songs(
             audio_list = [(a.audio, a.sr) for a in chunk_analyses]
             embeddings = compute_embeddings_batch(audio_list, batch_size=_CHUNK_SIZE)
 
-        for analysis, embedding in zip(chunk_analyses, embeddings):
-            songs.append(Song(
-                file_path=analysis.file_path,
-                filename=analysis.filename,
-                bpm=analysis.bpm,
-                key=analysis.key,
-                embedding=embedding,
-                beat_times=analysis.beat_times,
-                downbeat_times=analysis.downbeat_times,
-                content_hash=path_to_hash.get(Path(analysis.file_path), ""),
-                fingerprint=analysis.fingerprint,
-                duration_sec=analysis.duration_sec,
-            ))
+            for analysis, embedding in zip(chunk_analyses, embeddings):
+                songs.append(Song(
+                    file_path=analysis.file_path,
+                    filename=analysis.filename,
+                    bpm=analysis.bpm,
+                    key=analysis.key,
+                    embedding=embedding,
+                    beat_times=analysis.beat_times,
+                    downbeat_times=analysis.downbeat_times,
+                    content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+                    fingerprint=analysis.fingerprint,
+                    duration_sec=analysis.duration_sec,
+                ))
 
     # Fingerprint dedup against existing graph songs
     if known_fingerprints:
