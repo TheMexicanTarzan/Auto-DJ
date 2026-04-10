@@ -53,12 +53,19 @@ _clap_device = None
 # 30 s @ 24 kHz = 720 000 samples → keeps peak VRAM well below 2 GB.
 _EMBED_CHUNK_SEC = 30
 
+# Number of same-length chunks batched into one MERT forward pass.
+# With SDPA's O(N) attention memory, 4 × 30 s chunks fits comfortably
+# in 2 GB VRAM.  Increase if your GPU has more headroom.
+_EMBED_BATCH_SIZE = 4
+
 
 def _get_clap_model():
     """Lazy-load the MERT model and feature extractor on first use.
 
     When a CUDA-capable GPU is available the model is moved to it
     automatically, giving a significant speed-up for embedding inference.
+    SDPA (PyTorch native Flash Attention) and torch.compile are enabled
+    where supported, with graceful fallbacks for older hardware/software.
     """
     global _clap_model, _clap_processor, _clap_device
 
@@ -71,14 +78,46 @@ def _get_clap_model():
         _clap_processor = AutoFeatureExtractor.from_pretrained(
             local_path, trust_remote_code=True
         )
-        _clap_model = AutoModel.from_pretrained(local_path, trust_remote_code=True)
+
+        # Attempt SDPA (PyTorch native Flash / mem-efficient attention).
+        # Falls back silently if the model's custom code doesn't support it
+        # or if the transformers version predates the attn_implementation arg.
+        try:
+            _clap_model = AutoModel.from_pretrained(
+                local_path, trust_remote_code=True, attn_implementation="sdpa"
+            )
+            logger.info("MERT loaded with SDPA attention (Flash / mem-efficient).")
+        except Exception:
+            _clap_model = AutoModel.from_pretrained(local_path, trust_remote_code=True)
+            logger.info("MERT loaded with default attention (SDPA not supported).")
+
         _clap_model.eval()  # inference mode — no gradient tracking needed
 
         _clap_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         _clap_model.to(_clap_device)
         if _clap_device.type == "cuda":
             _clap_model.half()  # float16 halves weight memory (~380 MB → ~190 MB)
-        logger.info("MERT model loaded on device: %s", _clap_device)
+
+        # torch.compile — JIT-compiles MERT for faster inference.
+        # dynamic=True handles varying batch/chunk sizes without recompilation.
+        # The very first forward pass triggers compilation (~30–60 s); all
+        # subsequent calls run faster.  Requires PyTorch 2.0+.
+        if hasattr(torch, "compile"):
+            try:
+                _clap_model = torch.compile(_clap_model, dynamic=True)
+                logger.info(
+                    "MERT compiled with torch.compile "
+                    "(first inference call will be slow — compiling)."
+                )
+            except Exception:
+                logger.warning(
+                    "torch.compile failed; running in eager mode.",
+                    exc_info=True,
+                )
+        else:
+            logger.info("torch.compile not available (requires PyTorch 2.0+).")
+
+        logger.info("MERT model ready on device: %s", _clap_device)
 
     return _clap_model, _clap_processor
 
@@ -290,18 +329,21 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
 
 def compute_embeddings_batch(
     audio_list: list[tuple[np.ndarray, int]],
-    batch_size: int = 8,
 ) -> list[np.ndarray]:
     """
-    Compute CLAP embeddings for multiple audio signals in batched
-    forward passes.
+    Compute MERT embeddings for a batch of audio signals.
+
+    Each song is split into _EMBED_CHUNK_SEC-second segments.  Full-length
+    chunks (all the same size) are processed together in mini-batches of
+    _EMBED_BATCH_SIZE for better GPU utilisation.  Shorter trailing chunks
+    are processed individually to avoid padding waste.  Per-song embeddings
+    are reassembled via a length-weighted average of their chunk embeddings.
 
     Args:
         audio_list: List of (waveform, sample_rate) tuples.
-        batch_size: Number of audio signals per forward pass.
 
     Returns:
-        List of 1-D numpy arrays (one 512-dim embedding per input).
+        List of 1-D numpy arrays (one per input, shape = (hidden_dim,)).
     """
     if not audio_list:
         return []
@@ -312,8 +354,7 @@ def compute_embeddings_batch(
     target_sr = 24_000  # MERT was trained at 24 kHz
 
     # Resample all audio to 24 kHz in parallel.  Essentia's C++ Resample
-    # releases the GIL, so threads genuinely run concurrently.  Order is
-    # preserved by ThreadPoolExecutor.map().
+    # releases the GIL, so threads genuinely run concurrently.
     def _resample_one(args: tuple[np.ndarray, int]) -> np.ndarray:
         y, sr = args
         return _resample(y, orig_sr=sr, target_sr=target_sr) if sr != target_sr else y
@@ -321,44 +362,80 @@ def compute_embeddings_batch(
     with ThreadPoolExecutor() as pool:
         resampled = list(pool.map(_resample_one, audio_list))
 
-    embeddings: list[np.ndarray] = []
-    chunk_samples = _EMBED_CHUNK_SEC * target_sr  # e.g. 30 s × 24 000 = 720 000
+    chunk_samples = _EMBED_CHUNK_SEC * target_sr  # 720 000 samples per 30 s
 
-    for y in resampled:
-        # Split the waveform into fixed-length segments.  Drop any trailing
-        # segment shorter than 1 s — too short to produce a reliable embedding.
-        # If the whole track is shorter than 1 s, fall back to the full audio.
+    # Collect all chunks with their origin.  Each entry is a
+    # (song_idx, chunk_length_samples, chunk_array) tuple assigned at
+    # split time so batching cannot scramble the song→chunk mapping.
+    # Full-length chunks (all identical size → no padding) go into
+    # full_queue for batched inference; shorter trailing chunks are
+    # processed individually to avoid padding waste.
+    full_queue: list[tuple[int, int, np.ndarray]] = []
+    short_queue: list[tuple[int, int, np.ndarray]] = []
+
+    for song_idx, y in enumerate(resampled):
         chunks = [
             y[s : s + chunk_samples]
             for s in range(0, len(y), chunk_samples)
             if len(y[s : s + chunk_samples]) >= target_sr
         ]
         if not chunks:
-            chunks = [y]
-
-        chunk_embs: list[np.ndarray] = []
-        chunk_lengths: list[int] = []
+            chunks = [y]  # entire track is shorter than 1 s — embed as-is
         for chunk in chunks:
-            inputs = processor(
-                chunk,
-                sampling_rate=target_sr,
-                return_tensors="pt",
-                padding=True,
-            )
-            inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
-            if _clap_device.type == "cuda":
-                inputs = {k: v.half() if v.is_floating_point() else v
-                          for k, v in inputs.items()}
-            with torch.no_grad():
-                out = model(**inputs)
-            # Mean-pool over the time axis → (hidden_dim,)
-            chunk_embs.append(out.last_hidden_state.mean(dim=1).squeeze().cpu().float().numpy())
-            chunk_lengths.append(len(chunk))
+            entry = (song_idx, len(chunk), chunk)
+            (full_queue if len(chunk) == chunk_samples else short_queue).append(entry)
 
-        # Weighted average — longer chunks contribute proportionally more.
-        weights = np.array(chunk_lengths, dtype=np.float64)
-        weights /= weights.sum()
-        embeddings.append(np.average(chunk_embs, axis=0, weights=weights))
+    # ------------------------------------------------------------------
+    # Inner helper: one MERT forward pass for a list of same-length chunks
+    # ------------------------------------------------------------------
+    def _forward(items: list[tuple[int, int, np.ndarray]]) -> np.ndarray:
+        """Run MERT on *items* and return shape (len(items), hidden_dim)."""
+        arrays = [arr for _, _, arr in items]
+        inputs = processor(
+            arrays,
+            sampling_rate=target_sr,
+            return_tensors="pt",
+            padding=True,
+        )
+        inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
+        if _clap_device is not None and _clap_device.type == "cuda":
+            inputs = {k: v.half() if v.is_floating_point() else v
+                      for k, v in inputs.items()}
+        with torch.no_grad():
+            out = model(**inputs)
+        # Mean-pool over the time axis → (batch, hidden_dim)
+        return out.last_hidden_state.mean(dim=1).cpu().float().numpy()
+
+    # ------------------------------------------------------------------
+    # Run inference and collect (song_idx, chunk_length, embedding) tuples
+    # ------------------------------------------------------------------
+    results: list[tuple[int, int, np.ndarray]] = []
+
+    # Full-length chunks in mini-batches (same length → no padding waste)
+    for i in range(0, len(full_queue), _EMBED_BATCH_SIZE):
+        batch = full_queue[i : i + _EMBED_BATCH_SIZE]
+        embs = _forward(batch)           # shape (batch_size, hidden_dim)
+        for j, (si, cl, _) in enumerate(batch):
+            results.append((si, cl, embs[j]))
+
+    # Trailing short chunks — each processed individually
+    for item in short_queue:
+        emb = _forward([item])[0]        # [0]: (1, hidden_dim) → (hidden_dim,)
+        results.append((item[0], item[1], emb))
+
+    # ------------------------------------------------------------------
+    # Reassemble per-song embeddings via length-weighted average
+    # ------------------------------------------------------------------
+    song_chunks: list[list[tuple[int, np.ndarray]]] = [[] for _ in resampled]
+    for si, cl, emb in results:
+        song_chunks[si].append((cl, emb))
+
+    embeddings: list[np.ndarray] = []
+    for per_song in song_chunks:
+        lengths = np.array([cl for cl, _ in per_song], dtype=np.float64)
+        weights = lengths / lengths.sum()
+        embs = [e for _, e in per_song]
+        embeddings.append(np.average(embs, axis=0, weights=weights))
 
     return embeddings
 
@@ -496,7 +573,7 @@ class Song:
         for chunk in chunks:
             inputs = processor(chunk, sampling_rate=target_sr, return_tensors="pt")
             inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
-            if _clap_device.type == "cuda":
+            if _clap_device is not None and _clap_device.type == "cuda":
                 inputs = {k: v.half() if v.is_floating_point() else v
                           for k, v in inputs.items()}
             with torch.no_grad():

@@ -312,16 +312,17 @@ class TestComputeEmbeddingsBatch:
     def test_batch_returns_correct_count(self):
         import sys
 
-        fake_output = np.random.randn(3, 512).astype(np.float32)
+        # Each call to _forward returns shape (1, 512) — one chunk per song
+        # since the test audio (22050 samples) is shorter than one full chunk.
+        fake_chunk_emb = np.zeros((1, 512), dtype=np.float32)
 
         mock_outputs = MagicMock()
-        mock_outputs.cpu.return_value.numpy.return_value = fake_output
-        del mock_outputs.pooler_output
+        # model(**inputs).last_hidden_state.mean(dim=1).cpu().float().numpy()
+        mock_outputs.last_hidden_state.mean.return_value \
+            .cpu.return_value.float.return_value.numpy.return_value = fake_chunk_emb
 
-        mock_model = MagicMock()
-        mock_model.get_audio_features.return_value = mock_outputs
-        mock_processor = MagicMock(return_value={"input_features": MagicMock()})
-
+        mock_model = MagicMock(return_value=mock_outputs)
+        mock_processor = MagicMock(return_value={"input_values": MagicMock()})
         mock_torch = MagicMock()
 
         audio_list = [
@@ -331,8 +332,9 @@ class TestComputeEmbeddingsBatch:
 
         with patch.dict(sys.modules, {"torch": mock_torch}), \
              patch("src.models._resample", side_effect=lambda y, **kw: y), \
+             patch("src.models._clap_device", None), \
              patch("src.models._get_clap_model", return_value=(mock_model, mock_processor)):
-            embeddings = compute_embeddings_batch(audio_list, batch_size=8)
+            embeddings = compute_embeddings_batch(audio_list)
 
         assert len(embeddings) == 3
         for emb in embeddings:

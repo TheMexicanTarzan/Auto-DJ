@@ -186,59 +186,79 @@ def scan_directory(
     # Reverse map: path → hash (for attaching hashes to Song objects)
     path_to_hash: dict[Path, str] = {p: h for h, p in seen_hashes.items()}
 
-    # --- Phase 2: chunked analyse → embed → build Song loop ---
+    # --- Phase 2: pipelined analyse → embed → build Song loop ---
+    #
+    # The next chunk's analysis jobs are submitted to the process pool
+    # *before* compute_embeddings_batch blocks the main thread on the GPU.
+    # This lets CPU workers for chunk N+1 run in parallel with GPU embedding
+    # of chunk N, hiding the ~5–8 s analysis cost inside the ~52 s embed.
+    #
+    # Peak memory across all processes: up to 2 × _CHUNK_SIZE waveforms
+    # (current chunk in the main process + next chunk in worker processes).
     songs: list[Song] = []
     processed = 0
 
-    # One persistent pool for the full scan; spawn workers are safe when this
-    # runs inside a multi-threaded uvicorn process or after CUDA is loaded.
+    chunks = [
+        unique_paths[s : s + _CHUNK_SIZE]
+        for s in range(0, len(unique_paths), _CHUNK_SIZE)
+    ]
+
     with ProcessPoolExecutor(
         max_workers=_N_ANALYSIS_WORKERS,
         mp_context=_MP_SPAWN_CTX,
     ) as executor:
-        for chunk_start in range(0, len(unique_paths), _CHUNK_SIZE):
-            chunk_paths = unique_paths[chunk_start : chunk_start + _CHUNK_SIZE]
-
-            # 2a. Parallel audio analysis (BPM, key, beats) — all songs in
-            #     this chunk are submitted at once; futures are collected in
-            #     submission order so downstream processing stays deterministic.
-            futures = [
-                executor.submit(analyse_audio, str(p)) for p in chunk_paths
+        if chunks:
+            # Pre-submit the first chunk so workers start immediately.
+            current_futures = [
+                executor.submit(analyse_audio, str(p)) for p in chunks[0]
             ]
 
-            chunk_analyses = []
-            for path, future in zip(chunk_paths, futures):
-                processed += 1
-                try:
-                    analysis = future.result()
-                    chunk_analyses.append(analysis)
-                except Exception:
-                    logger.exception("Failed to analyse '%s', skipping.", path)
-                if progress_callback:
-                    progress_callback(processed + skipped, total, path.name)
+            for chunk_idx, chunk_paths in enumerate(chunks):
+                # Submit the NEXT chunk's analysis jobs before embedding the
+                # current chunk — CPU workers overlap with GPU inference.
+                if chunk_idx + 1 < len(chunks):
+                    next_futures = [
+                        executor.submit(analyse_audio, str(p))
+                        for p in chunks[chunk_idx + 1]
+                    ]
+                else:
+                    next_futures = []
 
-            if not chunk_analyses:
-                continue
+                # Collect current chunk's analysis results (submission order
+                # preserved so embeddings align with analyses below).
+                chunk_analyses = []
+                for path, future in zip(chunk_paths, current_futures):
+                    processed += 1
+                    try:
+                        analysis = future.result()
+                        chunk_analyses.append(analysis)
+                    except Exception:
+                        logger.exception("Failed to analyse '%s', skipping.", path)
+                    if progress_callback:
+                        progress_callback(processed + skipped, total, path.name)
 
-            # 2b. Batch CLAP embeddings for this chunk (main process)
-            audio_list = [(a.audio, a.sr) for a in chunk_analyses]
-            embeddings = compute_embeddings_batch(audio_list, batch_size=_CHUNK_SIZE)
+                if chunk_analyses:
+                    # Embed current chunk — next chunk's workers run in parallel.
+                    audio_list = [(a.audio, a.sr) for a in chunk_analyses]
+                    embeddings = compute_embeddings_batch(audio_list)
 
-            # 2c. Build Song objects — raw audio is released when
-            #     chunk_analyses goes out of scope at next iteration.
-            for analysis, embedding in zip(chunk_analyses, embeddings):
-                songs.append(Song(
-                    file_path=analysis.file_path,
-                    filename=analysis.filename,
-                    bpm=analysis.bpm,
-                    key=analysis.key,
-                    embedding=embedding,
-                    beat_times=analysis.beat_times,
-                    downbeat_times=analysis.downbeat_times,
-                    content_hash=path_to_hash.get(Path(analysis.file_path), ""),
-                    fingerprint=analysis.fingerprint,
-                    duration_sec=analysis.duration_sec,
-                ))
+                    # Build Song objects; raw audio released when chunk_analyses
+                    # goes out of scope at the next iteration.
+                    for analysis, embedding in zip(chunk_analyses, embeddings):
+                        songs.append(Song(
+                            file_path=analysis.file_path,
+                            filename=analysis.filename,
+                            bpm=analysis.bpm,
+                            key=analysis.key,
+                            embedding=embedding,
+                            beat_times=analysis.beat_times,
+                            downbeat_times=analysis.downbeat_times,
+                            content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+                            fingerprint=analysis.fingerprint,
+                            duration_sec=analysis.duration_sec,
+                        ))
+
+                current_futures = next_futures
 
     # --- Phase 3: fingerprint-based deduplication ---
     # Catches cross-format / cross-album duplicates that SHA-256 misses
@@ -357,47 +377,56 @@ def analyse_new_songs(
     for p in paths:
         path_to_hash[p] = _file_hash(p)
 
+    chunks = [paths[s : s + _CHUNK_SIZE] for s in range(0, len(paths), _CHUNK_SIZE)]
+
     with ProcessPoolExecutor(
         max_workers=_N_ANALYSIS_WORKERS,
         mp_context=_MP_SPAWN_CTX,
     ) as executor:
-        for chunk_start in range(0, len(paths), _CHUNK_SIZE):
-            chunk_paths = paths[chunk_start : chunk_start + _CHUNK_SIZE]
-
-            futures = [
-                executor.submit(analyse_audio, str(p)) for p in chunk_paths
+        if chunks:
+            current_futures = [
+                executor.submit(analyse_audio, str(p)) for p in chunks[0]
             ]
 
-            chunk_analyses = []
-            for path, future in zip(chunk_paths, futures):
-                processed += 1
-                try:
-                    analysis = future.result()
-                    chunk_analyses.append(analysis)
-                except Exception:
-                    logger.exception("Failed to analyse '%s', skipping.", path)
-                if progress_callback:
-                    progress_callback(processed, total, path.name)
+            for chunk_idx, chunk_paths in enumerate(chunks):
+                if chunk_idx + 1 < len(chunks):
+                    next_futures = [
+                        executor.submit(analyse_audio, str(p))
+                        for p in chunks[chunk_idx + 1]
+                    ]
+                else:
+                    next_futures = []
 
-            if not chunk_analyses:
-                continue
+                chunk_analyses = []
+                for path, future in zip(chunk_paths, current_futures):
+                    processed += 1
+                    try:
+                        analysis = future.result()
+                        chunk_analyses.append(analysis)
+                    except Exception:
+                        logger.exception("Failed to analyse '%s', skipping.", path)
+                    if progress_callback:
+                        progress_callback(processed, total, path.name)
 
-            audio_list = [(a.audio, a.sr) for a in chunk_analyses]
-            embeddings = compute_embeddings_batch(audio_list, batch_size=_CHUNK_SIZE)
+                if chunk_analyses:
+                    audio_list = [(a.audio, a.sr) for a in chunk_analyses]
+                    embeddings = compute_embeddings_batch(audio_list)
 
-            for analysis, embedding in zip(chunk_analyses, embeddings):
-                songs.append(Song(
-                    file_path=analysis.file_path,
-                    filename=analysis.filename,
-                    bpm=analysis.bpm,
-                    key=analysis.key,
-                    embedding=embedding,
-                    beat_times=analysis.beat_times,
-                    downbeat_times=analysis.downbeat_times,
-                    content_hash=path_to_hash.get(Path(analysis.file_path), ""),
-                    fingerprint=analysis.fingerprint,
-                    duration_sec=analysis.duration_sec,
-                ))
+                    for analysis, embedding in zip(chunk_analyses, embeddings):
+                        songs.append(Song(
+                            file_path=analysis.file_path,
+                            filename=analysis.filename,
+                            bpm=analysis.bpm,
+                            key=analysis.key,
+                            embedding=embedding,
+                            beat_times=analysis.beat_times,
+                            downbeat_times=analysis.downbeat_times,
+                            content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+                            fingerprint=analysis.fingerprint,
+                            duration_sec=analysis.duration_sec,
+                        ))
+
+                current_futures = next_futures
 
     # Fingerprint dedup against existing graph songs
     if known_fingerprints:
