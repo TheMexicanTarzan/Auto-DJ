@@ -8,7 +8,8 @@
  *   - Path highlighting (nodes + edges) with edge-type coloring
  *   - Node click inspection (top-K neighbours)
  *   - Tempo-relationship checkboxes for pathfinding / neighbor filtering
- *   - Weight tuning with server-side recalculation
+ *   - Directory tree filtering
+ *   - Tabbed sidebar navigation
  */
 
 /* global graphology, Sigma */
@@ -18,8 +19,8 @@
 // =========================================================================
 
 var EDGE_COLORS = {
-  direct:  { path: "#e53e3e", hover: "#718096" },
-  double:  { path: "#48bb78", hover: "#276749" },
+  direct:  { path: "#48bb78", hover: "#276749" },
+  double:  { path: "#e53e3e", hover: "#718096" },
   triplet: { path: "#4299e1", hover: "#2b6cb0" },
 };
 
@@ -41,6 +42,8 @@ var songList = [];          // [{id, label}]
 // Selections
 var startId = null;
 var endId = null;
+var waypoints = [];        // [{key, id}] – ordered intermediate stops
+var waypointCounter = 0;
 
 // Rendering state — sets checked by reducers
 var highlightedNodes = new Set();
@@ -102,6 +105,57 @@ function getAllowedTypes() {
   if (document.getElementById("filter-double").checked)  types.push("double");
   if (document.getElementById("filter-triplet").checked) types.push("triplet");
   return types;
+}
+
+/** Escape a string for safe insertion into innerHTML. */
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * Build the HTML string for a vertical path-flow from an array of node IDs.
+ * Shared by the Pathfinding and Create Setlist tabs.
+ */
+function renderPathFlowHtml(pathNodes) {
+  if (!pathNodes || pathNodes.length === 0) {
+    return '<p class="output-msg">No tracks found.</p>';
+  }
+  var html = '<div class="path-flow">';
+  pathNodes.forEach(function (nid, i) {
+    var label = graphInstance.hasNode(nid)
+      ? graphInstance.getNodeAttribute(nid, "label") : nid;
+    var bpm = graphInstance.hasNode(nid)
+      ? graphInstance.getNodeAttribute(nid, "bpm") : "";
+    var key = graphInstance.hasNode(nid)
+      ? graphInstance.getNodeAttribute(nid, "key") : "";
+
+    html += '<div class="path-flow-card">';
+    html += '<div class="path-flow-card-title">' + escapeHtml(label) + '</div>';
+    if (bpm || key) {
+      html += '<div class="path-flow-card-meta">';
+      if (bpm) html += '<span>BPM: ' + escapeHtml(String(bpm)) + '</span>';
+      if (key) html += '<span>Key: ' + escapeHtml(String(key)) + '</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+
+    if (i < pathNodes.length - 1) {
+      var nextNid = pathNodes[i + 1];
+      var edgeType = "direct";
+      if (graphInstance.hasNode(nid) && graphInstance.hasNode(nextNid)) {
+        var ek = graphInstance.edge(nid, nextNid);
+        if (ek != null) edgeType = graphInstance.getEdgeAttribute(ek, "edge_type") || "direct";
+      }
+      html += '<div class="path-flow-arrow">\u2193 <span class="edge-badge edge-badge--'
+        + escapeHtml(edgeType) + '">' + escapeHtml(edgeType) + '</span></div>';
+    }
+  });
+  html += '</div>';
+  return html;
 }
 
 // =========================================================================
@@ -202,7 +256,7 @@ function buildGraphology(graphData) {
       y: n.y,
       label: n.label,
       size: 2,
-      color: "#6c7a89",
+      color: "#4A4A4A",
       bpm: n.bpm,
       key: n.key,
       directory: nodeDirectory(n.id, base),
@@ -266,7 +320,7 @@ async function loadGraph() {
     var bgH = size + padY * 2;
     var radius = 3;
 
-    context.fillStyle = "rgba(26, 32, 44, 0.85)";
+    context.fillStyle = "rgba(30, 30, 30, 0.85)";
     context.beginPath();
     context.moveTo(bgX + radius, bgY);
     context.lineTo(bgX + bgW - radius, bgY);
@@ -290,9 +344,9 @@ async function loadGraph() {
   sigmaInstance = new Sigma(graphInstance, container, {
     renderEdgeLabels: false,
     enableEdgeEvents: false,
-    defaultNodeColor: "#6c7a89",
-    defaultEdgeColor: "#cbd5e0",
-    labelColor: { color: "#e2e8f0" },
+    defaultNodeColor: "#4A4A4A",
+    defaultEdgeColor: "#333333",
+    labelColor: { color: "#4A4A4A" },
     labelFont: "Segoe UI, Roboto, sans-serif",
     labelSize: 12,
     labelRenderedSizeThreshold: 100,
@@ -320,52 +374,6 @@ async function loadGraph() {
   }
 }
 
-/** Reload graph data from server (after recalculate) without full page reload. */
-async function reloadGraphData() {
-  var graphResp = await fetch("/api/graph");
-  var graphData = await graphResp.json();
-
-  // Clear old state
-  highlightedNodes.clear();
-  highlightedEdges.clear();
-  hoveredNode = null;
-  hoveredNeighbors.clear();
-  hoveredEdgeKeys.clear();
-  detailNode = null;
-
-  songsBaseDir = graphData.songs_directory || songsBaseDir;
-  directoryTree = graphData.directory_tree || directoryTree;
-
-  // Rebuild graphology keeping existing positions
-  var base = songsBaseDir;
-  graphInstance.clear();
-  graphData.nodes.forEach(function (n) {
-    graphInstance.addNode(n.id, {
-      x: n.x, y: n.y,
-      label: n.label,
-      size: 2,
-      color: "#6c7a89",
-      bpm: n.bpm,
-      key: n.key,
-      directory: nodeDirectory(n.id, base),
-    });
-  });
-  graphData.edges.forEach(function (e) {
-    if (!graphInstance.hasEdge(e.source, e.target)) {
-      var etype = e.edge_type || "direct";
-      graphInstance.addEdge(e.source, e.target, {
-        weight: e.weight,
-        edge_type: etype,
-        color: edgePathColor(etype),
-        hidden: true,
-      });
-    }
-  });
-
-  buildAdjacencyCache();
-  sigmaInstance.refresh();
-  updateHeaderStats(graphData);
-}
 
 // =========================================================================
 // 3. Reducers (control what is visible)
@@ -373,15 +381,13 @@ async function reloadGraphData() {
 
 
 function nodeReducer(node, data) {
-  // Directory filter: hide nodes not in active directories
   if (activeDirectories !== null) {
     var nodeDir = data.directory || ".";
     if (!isDirectoryActive(nodeDir)) {
-      return { x: data.x, y: data.y, hidden: true, color: "#4a5568", size: 0, label: null, zIndex: 0 };
+      return { x: data.x, y: data.y, hidden: true, color: "#2D2D2D", size: 0, label: null, zIndex: 0 };
     }
   }
 
-  // Fast path: nothing active — return data as-is (zero allocation)
   if (highlightedNodes.size === 0 && hoveredNode === null && detailNode === null) {
     return data;
   }
@@ -391,18 +397,16 @@ function nodeReducer(node, data) {
   var isHighlighted = highlightedNodes.has(node);
   var isDetail = detailNode !== null && node === detailNode;
 
-  // Dim path: node is not involved in any active state
   if (highlightedNodes.size > 0 && !isHighlighted && !isHovered && !isNeighbor && !isDetail) {
-    return { x: data.x, y: data.y, color: "#4a5568", size: 1.5, label: null, zIndex: 0 };
+    return { x: data.x, y: data.y, color: "#2D2D2D", size: 1.5, label: null, zIndex: 0 };
   }
 
-  // Only remaining: nodes that actually need modification
   if (!isHighlighted && !isHovered && !isNeighbor && !isDetail) return data;
 
   var res = Object.assign({}, data);
 
   if (highlightedNodes.size > 0 && isHighlighted) {
-    res.color = "#e53e3e";
+    res.color = "#39FF14";
     res.size = 4;
     res.zIndex = 2;
     res.label = data.label;
@@ -410,7 +414,7 @@ function nodeReducer(node, data) {
   }
 
   if (isDetail) {
-    res.color = "#f6ad55";
+    res.color = "#39FF14";
     res.size = 4;
     res.zIndex = 2;
     res.label = data.label;
@@ -418,14 +422,14 @@ function nodeReducer(node, data) {
   }
 
   if (isHovered) {
-    res.color = "#fc8181";
+    res.color = "#39FF14";
     res.size = 5;
     res.label = data.label;
-    res.labelColor = "#ffffff";
+    res.labelColor = "#4A4A4A";
     res.zIndex = 3;
     res.forceLabel = true;
   } else if (isNeighbor) {
-    res.color = res.color === "#e53e3e" ? "#e53e3e" : "#a0aec0";
+    res.color = res.color === "#39FF14" ? "#39FF14" : "#9CA3AF";
     res.size = res.size > 2 ? res.size : 2.5;
   }
 
@@ -510,7 +514,7 @@ async function loadNodeDetails(nodeId) {
   if (sigmaInstance) scheduleRefresh();
 
   var detailsEl = document.getElementById("node-details");
-  detailsEl.textContent = "Loading...";
+  detailsEl.innerHTML = '<p class="output-msg">Loading...</p>';
 
   var k = parseInt(document.getElementById("top-k-input").value, 10) || 10;
   var types = getAllowedTypes();
@@ -523,36 +527,47 @@ async function loadNodeDetails(nodeId) {
     var data = await resp.json();
 
     if (data.error) {
-      detailsEl.textContent = data.error;
+      detailsEl.innerHTML = '<p class="output-msg">' + escapeHtml(data.error) + '</p>';
       return;
     }
 
-    var lines = [
-      data.node.label,
-      "BPM: " + data.node.bpm + "  |  Key: " + data.node.key,
-      "Path: " + data.node.id,
-      "",
-      "Top " + data.neighbors.length + " Mixable Tracks:",
-      "------------------------------------",
-    ];
+    var html = '<div class="node-header">';
+    html += '<div class="node-title">' + escapeHtml(data.node.label) + '</div>';
+    html += '<div class="node-meta">';
+    html += '<span>BPM: ' + escapeHtml(String(data.node.bpm)) + '</span>';
+    html += '<span>Key: ' + escapeHtml(data.node.key) + '</span>';
+    html += '</div>';
+    html += '<div class="node-path">' + escapeHtml(data.node.id) + '</div>';
+    html += '</div>';
+
+    html += '<div class="neighbors-section">';
+    html += '<div class="neighbors-heading">Top ' + data.neighbors.length + ' Mixable Tracks</div>';
 
     if (data.neighbors.length === 0) {
-      lines.push("  (no compatible neighbours)");
+      html += '<p class="no-neighbors">No compatible neighbours found.</p>';
     } else {
+      html += '<table class="neighbors-table">';
+      html += '<thead><tr><th>#</th><th>Track</th><th>BPM</th><th>Key</th></tr></thead>';
+      html += '<tbody>';
       data.neighbors.forEach(function (nbr, i) {
-        var typeTag = nbr.edge_type && nbr.edge_type !== "direct"
-          ? " [" + nbr.edge_type + "]" : "";
-        lines.push(
-          "  " + (i + 1) + ". " + nbr.label + typeTag +
-          "\n     BPM: " + nbr.bpm + " | Key: " + nbr.key +
-          "\n     Transition cost: " + nbr.cost.toFixed(4)
-        );
+        var badge = (nbr.edge_type && nbr.edge_type !== "direct")
+          ? ' <span class="edge-badge edge-badge--' + escapeHtml(nbr.edge_type) + '">'
+            + escapeHtml(nbr.edge_type) + '</span>'
+          : '';
+        html += '<tr>';
+        html += '<td class="col-rank">' + (i + 1) + '</td>';
+        html += '<td>' + escapeHtml(nbr.label) + badge + '</td>';
+        html += '<td>' + escapeHtml(String(nbr.bpm)) + '</td>';
+        html += '<td>' + escapeHtml(nbr.key) + '</td>';
+        html += '</tr>';
       });
+      html += '</tbody></table>';
     }
 
-    detailsEl.textContent = lines.join("\n");
+    html += '</div>';
+    detailsEl.innerHTML = html;
   } catch (err) {
-    detailsEl.textContent = "Failed to load details.";
+    detailsEl.innerHTML = '<p class="output-msg">Failed to load details.</p>';
   }
 }
 
@@ -574,13 +589,13 @@ function renderDirectoryTree(tree) {
   var container = document.getElementById("directory-tree");
   container.innerHTML = "";
 
-  // If tree has no children (flat library), hide the filter entirely
+  // If tree has no children (flat library), hide the whole settings section
+  var dirSection = document.getElementById("settings-dir-section");
   if (!tree.children || tree.children.length === 0) {
-    document.getElementById("directory-filter").style.display = "none";
+    if (dirSection) dirSection.style.display = "none";
     return;
   }
-
-  document.getElementById("directory-filter").style.display = "";
+  if (dirSection) dirSection.style.display = "";
 
   // Collect all directory paths for the "all active" baseline
   var allDirs = collectAllDirs(tree, []);
@@ -795,21 +810,24 @@ function populateSearch() {
   });
 }
 
-function setupAutocomplete(inputId, resultsId, onSelect) {
-  var input = document.getElementById(inputId);
-  var resultsDiv = document.getElementById(resultsId);
+/**
+ * Wire autocomplete behaviour onto pre-existing input + results elements.
+ * Called both for static inputs (via setupAutocomplete) and for dynamically
+ * created waypoint rows.
+ */
+function wireAutocomplete(inputEl, resultsEl, onSelect) {
   var activeIndex = -1;
   var debounceTimer = null;
 
-  input.addEventListener("input", function () {
+  inputEl.addEventListener("input", function () {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(function () {
-      var query = input.value.toLowerCase().trim();
+      var query = inputEl.value.toLowerCase().trim();
       activeIndex = -1;
 
       if (query.length < 1) {
-        resultsDiv.innerHTML = "";
-        resultsDiv.classList.remove("open");
+        resultsEl.innerHTML = "";
+        resultsEl.classList.remove("open");
         return;
       }
 
@@ -819,8 +837,8 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
       }).slice(0, 50);
 
       if (matches.length === 0) {
-        resultsDiv.innerHTML = "";
-        resultsDiv.classList.remove("open");
+        resultsEl.innerHTML = "";
+        resultsEl.classList.remove("open");
         return;
       }
 
@@ -831,21 +849,21 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
         div.textContent = m.label;
         div.addEventListener("mousedown", function (e) {
           e.preventDefault();
-          input.value = m.label;
+          inputEl.value = m.label;
           onSelect(m.id);
-          resultsDiv.classList.remove("open");
+          resultsEl.classList.remove("open");
         });
         frag.appendChild(div);
       });
 
-      resultsDiv.innerHTML = "";
-      resultsDiv.appendChild(frag);
-      resultsDiv.classList.add("open");
+      resultsEl.innerHTML = "";
+      resultsEl.appendChild(frag);
+      resultsEl.classList.add("open");
     }, 100);
   });
 
-  input.addEventListener("keydown", function (e) {
-    var items = resultsDiv.querySelectorAll(".result-item");
+  inputEl.addEventListener("keydown", function (e) {
+    var items = resultsEl.querySelectorAll(".result-item");
     if (!items.length) return;
 
     if (e.key === "ArrowDown") {
@@ -862,22 +880,31 @@ function setupAutocomplete(inputId, resultsId, onSelect) {
         items[activeIndex].dispatchEvent(new Event("mousedown"));
       }
     } else if (e.key === "Escape") {
-      resultsDiv.classList.remove("open");
+      resultsEl.classList.remove("open");
     }
   });
 
-  input.addEventListener("blur", function () {
+  inputEl.addEventListener("blur", function () {
     // Delay to allow click on result item
     setTimeout(function () {
-      resultsDiv.classList.remove("open");
+      resultsEl.classList.remove("open");
     }, 200);
   });
 
-  input.addEventListener("focus", function () {
-    if (input.value.length >= 1 && resultsDiv.children.length > 0) {
-      resultsDiv.classList.add("open");
+  inputEl.addEventListener("focus", function () {
+    if (inputEl.value.length >= 1 && resultsEl.children.length > 0) {
+      resultsEl.classList.add("open");
     }
   });
+}
+
+/** Convenience wrapper for statically-rendered inputs addressed by ID. */
+function setupAutocomplete(inputId, resultsId, onSelect) {
+  wireAutocomplete(
+    document.getElementById(inputId),
+    document.getElementById(resultsId),
+    onSelect
+  );
 }
 
 function updateActive(items, idx) {
@@ -892,20 +919,76 @@ function updateActive(items, idx) {
 }
 
 // =========================================================================
-// 6. Pathfinding
+// 6. Waypoints
+// =========================================================================
+
+/** Dynamically insert a new "Via" search row into the waypoints container. */
+function addWaypointRow() {
+  var key = waypointCounter++;
+  var wp = { key: key, id: null };
+  waypoints.push(wp);
+
+  var container = document.getElementById("waypoints-container");
+
+  var row = document.createElement("div");
+  row.className = "waypoint-row";
+  row.dataset.key = String(key);
+
+  var lbl = document.createElement("label");
+  lbl.textContent = "Via";
+  row.appendChild(lbl);
+
+  var sw = document.createElement("div");
+  sw.className = "search-wrapper";
+
+  var input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Search for a track...";
+  input.autocomplete = "off";
+
+  var results = document.createElement("div");
+  results.className = "search-results";
+
+  sw.appendChild(input);
+  sw.appendChild(results);
+  row.appendChild(sw);
+
+  var removeBtn = document.createElement("button");
+  removeBtn.className = "waypoint-remove-btn";
+  removeBtn.title = "Remove";
+  removeBtn.textContent = "\u00D7"; // ×
+  removeBtn.addEventListener("click", function () {
+    var idx = waypoints.findIndex(function (w) { return w.key === key; });
+    if (idx !== -1) waypoints.splice(idx, 1);
+    row.remove();
+  });
+  row.appendChild(removeBtn);
+
+  container.appendChild(row);
+  wireAutocomplete(input, results, function (id) { wp.id = id; });
+  input.focus();
+}
+
+document.getElementById("add-waypoint-btn").addEventListener("click", addWaypointRow);
+
+// =========================================================================
+// 7. Pathfinding
 // =========================================================================
 
 document.getElementById("find-path-btn").addEventListener("click", async function () {
   var outputEl = document.getElementById("path-output");
 
   if (!startId || !endId) {
-    outputEl.textContent = "Please select both a start and destination song.";
+    outputEl.innerHTML = '<p class="output-msg">Please select both a start and destination song.</p>';
     return;
   }
 
+  // Collect ordered waypoint IDs, skipping any that were left blank
+  var waypointIds = waypoints.map(function (wp) { return wp.id; }).filter(Boolean);
+
   var btn = document.getElementById("find-path-btn");
   btn.disabled = true;
-  outputEl.textContent = "Finding path...";
+  outputEl.innerHTML = '<p class="output-msg">Finding path...</p>';
 
   try {
     var allowedTypes = getAllowedTypes();
@@ -924,6 +1007,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
       body: JSON.stringify({
         start: startId,
         end: endId,
+        waypoints: waypointIds.length > 0 ? waypointIds : null,
         allowed_types: allowedTypes.length < 3 ? allowedTypes : null,
         excluded_dirs: excludedDirs,
       }),
@@ -931,12 +1015,12 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
     var result = await resp.json();
 
     if (result.error) {
-      outputEl.textContent = result.error;
+      outputEl.innerHTML = '<p class="output-msg">' + escapeHtml(result.error) + '</p>';
       clearHighlights();
       return;
     }
 
-    // Update highlights
+    // Update graph highlights
     highlightedNodes.clear();
     highlightedEdges.clear();
 
@@ -944,7 +1028,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
       if (graphInstance.hasNode(nid)) highlightedNodes.add(nid);
     });
 
-    // Find edge keys in graphology for each path edge pair
+    // Find edge keys in graphology for each path edge pair.
     // (undirected graph — edge() returns the key regardless of argument order)
     // Guard with hasNode() in case the backend graph was updated after the
     // frontend loaded its snapshot (stale node IDs would crash .edge()).
@@ -959,9 +1043,11 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
 
     syncZIndex();
     sigmaInstance.refresh();
-    outputEl.textContent = result.summary;
+
+    // Render path as a vertical flow of track cards with arrows between them
+    outputEl.innerHTML = renderPathFlowHtml(result.path_nodes);
   } catch (err) {
-    outputEl.textContent = "Request failed: " + err.message;
+    outputEl.innerHTML = '<p class="output-msg">Request failed: ' + escapeHtml(err.message) + '</p>';
   } finally {
     btn.disabled = false;
   }
@@ -977,48 +1063,321 @@ function clearHighlights() {
   }
 }
 
+
 // =========================================================================
-// 7. Recalculate edges
+// 8. Create Setlist
 // =========================================================================
 
-document.getElementById("recalculate-btn").addEventListener("click", async function () {
-  var btn = document.getElementById("recalculate-btn");
-  var statusEl = document.getElementById("recalculate-status");
+// Mutable setlist state (updated when user swaps songs)
+var setlistNodes = [];
+var activeSetlistIndex = -1;
+var currentSetlistSummary = "";
+var currentSetlistName = "";
+
+/** Apply graph highlights from a path result (shared with pathfinding). */
+function applyPathHighlights(pathNodes, pathEdges) {
+  highlightedNodes.clear();
+  highlightedEdges.clear();
+
+  pathNodes.forEach(function (nid) {
+    if (graphInstance.hasNode(nid)) highlightedNodes.add(nid);
+  });
+  pathEdges.forEach(function (pair) {
+    if (graphInstance.hasNode(pair[0]) && graphInstance.hasNode(pair[1])) {
+      var ek = graphInstance.edge(pair[0], pair[1]);
+      if (ek != null) highlightedEdges.add(ek);
+    }
+  });
+
+  syncZIndex();
+  sigmaInstance.refresh();
+}
+
+document.getElementById("generate-setlist-btn").addEventListener("click", async function () {
+  var outputEl = document.getElementById("setlist-output");
+  var btn = document.getElementById("generate-setlist-btn");
+
+  var minBpm = parseFloat(document.getElementById("sl-min-bpm").value);
+  var maxBpm = parseFloat(document.getElementById("sl-max-bpm").value);
+  var targetMin = parseFloat(document.getElementById("sl-target-duration").value) || 60;
+  var startingKey = document.getElementById("sl-starting-key").value || null;
+  var setKey = document.getElementById("sl-set-key").value || null;
+
+  // Basic client-side validation
+  if (!isNaN(minBpm) && !isNaN(maxBpm) && minBpm > maxBpm) {
+    outputEl.innerHTML = '<p class="output-msg">Min BPM must be \u2264 Max BPM.</p>';
+    return;
+  }
+
   btn.disabled = true;
-  statusEl.textContent = "Recalculating...";
+  outputEl.innerHTML = '<p class="output-msg">Generating setlist\u2026</p>';
 
   try {
-    var resp = await fetch("/api/recalculate", {
+    var resp = await fetch("/api/setlist", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        harmonic: parseFloat(document.getElementById("w-harmonic").value) || 0.35,
-        tempo:    parseFloat(document.getElementById("w-tempo").value)    || 0.25,
-        semantic: parseFloat(document.getElementById("w-semantic").value) || 0.40,
-        double_penalty:  parseFloat(document.getElementById("w-double").value)  || 0.0,
-        triplet_penalty: parseFloat(document.getElementById("w-triplet").value) || 0.0,
+        min_bpm: isNaN(minBpm) ? 0 : minBpm,
+        max_bpm: isNaN(maxBpm) ? 999 : maxBpm,
+        target_duration_min: targetMin,
+        starting_key: startingKey,
+        set_key: setKey,
+        allowed_types: getAllowedTypes(),
       }),
     });
     var result = await resp.json();
 
     if (result.error) {
-      statusEl.textContent = "Error: " + result.error;
+      outputEl.innerHTML = '<p class="output-msg">' + escapeHtml(result.error) + '</p>';
       return;
     }
 
-    statusEl.textContent = result.message + " (" + result.num_edges + " edges)";
+    // Store mutable setlist state
+    setlistNodes = result.path_nodes.slice();
+    currentSetlistSummary = result.summary;
+    currentSetlistName = "";
+    activeSetlistIndex = -1;
 
-    // Reload graph to reflect new edges
-    await reloadGraphData();
+    // Highlight the generated setlist on the graph
+    applyPathHighlights(result.path_nodes, result.path_edges);
+
+    // Render: summary + save button, then interactive track flow
+    renderSetlistOutput();
   } catch (err) {
-    statusEl.textContent = "Request failed: " + err.message;
+    outputEl.innerHTML = '<p class="output-msg">Request failed: ' + escapeHtml(err.message) + '</p>';
   } finally {
     btn.disabled = false;
   }
 });
 
+/** (Re-)render the full setlist output using the current setlistNodes array. */
+function renderSetlistOutput() {
+  var outputEl = document.getElementById("setlist-output");
+  outputEl.innerHTML = "";
+
+  // Setlist name input
+  var nameRow = document.createElement("div");
+  nameRow.className = "setlist-name-row";
+  var nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.className = "setlist-name-input";
+  nameInput.placeholder = "Setlist name\u2026";
+  nameInput.value = currentSetlistName;
+  nameInput.addEventListener("input", function () {
+    currentSetlistName = nameInput.value;
+  });
+  nameRow.appendChild(nameInput);
+  outputEl.appendChild(nameRow);
+
+  // Header: summary + save button
+  var header = document.createElement("div");
+  header.className = "setlist-result-header";
+
+  var summaryEl = document.createElement("span");
+  summaryEl.className = "setlist-summary";
+  summaryEl.textContent = currentSetlistSummary;
+  header.appendChild(summaryEl);
+
+  var saveBtn = document.createElement("button");
+  saveBtn.className = "save-setlist-btn";
+  saveBtn.textContent = "Save Setlist";
+  saveBtn.addEventListener("click", async function () {
+    var name = nameInput.value.trim() || "My Setlist";
+    saveBtn.textContent = "Saving\u2026";
+    saveBtn.disabled = true;
+
+    // Remove any previous error
+    var prevErr = outputEl.querySelector(".setlist-save-error");
+    if (prevErr) prevErr.remove();
+
+    try {
+      var resp = await fetch("/api/save_setlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          setlist_name: name,
+          track_paths: setlistNodes,
+        }),
+      });
+      var result = await resp.json();
+
+      if (result.error) {
+        saveBtn.textContent = "Save Setlist";
+        saveBtn.disabled = false;
+        var errEl = document.createElement("p");
+        errEl.className = "setlist-save-error";
+        errEl.textContent = result.error;
+        header.after(errEl);
+      } else {
+        saveBtn.textContent = "Saved \u2713";
+        saveBtn.classList.add("save-setlist-btn--saved");
+        // stays disabled
+      }
+    } catch (err) {
+      saveBtn.textContent = "Save Setlist";
+      saveBtn.disabled = false;
+      var errEl = document.createElement("p");
+      errEl.className = "setlist-save-error";
+      errEl.textContent = "Request failed: " + err.message;
+      header.after(errEl);
+    }
+  });
+  header.appendChild(saveBtn);
+
+  outputEl.appendChild(header);
+  outputEl.appendChild(buildSetlistFlow(setlistNodes));
+}
+
+/** Build the DOM for the setlist path-flow with interactive (clickable) cards. */
+function buildSetlistFlow(pathNodes) {
+  var flow = document.createElement("div");
+  flow.className = "path-flow";
+
+  pathNodes.forEach(function (nid, i) {
+    var label = graphInstance.hasNode(nid) ? graphInstance.getNodeAttribute(nid, "label") : nid;
+    var bpm   = graphInstance.hasNode(nid) ? graphInstance.getNodeAttribute(nid, "bpm")   : "";
+    var key   = graphInstance.hasNode(nid) ? graphInstance.getNodeAttribute(nid, "key")   : "";
+
+    var card = document.createElement("div");
+    card.className = "path-flow-card path-flow-card--interactive";
+    if (i === activeSetlistIndex) card.classList.add("path-flow-card--active");
+    card.dataset.index = String(i);
+
+    var titleEl = document.createElement("div");
+    titleEl.className = "path-flow-card-title";
+    titleEl.textContent = label;
+    card.appendChild(titleEl);
+
+    if (bpm || key) {
+      var metaEl = document.createElement("div");
+      metaEl.className = "path-flow-card-meta";
+      if (bpm) { var s1 = document.createElement("span"); s1.textContent = "BPM: " + bpm; metaEl.appendChild(s1); }
+      if (key) { var s2 = document.createElement("span"); s2.textContent = "Key: " + key; metaEl.appendChild(s2); }
+      card.appendChild(metaEl);
+    }
+
+    var capturedIndex = i;
+    var capturedNodeId = nid;
+    card.addEventListener("click", function () {
+      onSetlistCardClick(capturedIndex, capturedNodeId, flow);
+    });
+
+    flow.appendChild(card);
+
+    // Inline neighbor picker (shown when this card is active)
+    if (i === activeSetlistIndex) {
+      var picker = document.createElement("div");
+      picker.className = "setlist-neighbor-picker";
+      picker.innerHTML = '<p class="output-msg" style="margin:6px 8px">Loading alternatives\u2026</p>';
+      flow.appendChild(picker);
+      // Fetch and populate asynchronously
+      populateSetlistPicker(picker, capturedNodeId, capturedIndex);
+    }
+
+    if (i < pathNodes.length - 1) {
+      var nextNid = pathNodes[i + 1];
+      var edgeType = "direct";
+      if (graphInstance.hasNode(nid) && graphInstance.hasNode(nextNid)) {
+        var ek = graphInstance.edge(nid, nextNid);
+        if (ek != null) edgeType = graphInstance.getEdgeAttribute(ek, "edge_type") || "direct";
+      }
+      var arrow = document.createElement("div");
+      arrow.className = "path-flow-arrow";
+      var badge = document.createElement("span");
+      badge.className = "edge-badge edge-badge--" + edgeType;
+      badge.textContent = edgeType;
+      arrow.appendChild(document.createTextNode("\u2193"));
+      arrow.appendChild(badge);
+      flow.appendChild(arrow);
+    }
+  });
+
+  return flow;
+}
+
+/** Fetch neighbors and populate the picker panel. */
+async function populateSetlistPicker(pickerEl, nodeId, index) {
+  try {
+    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId) + "?k=8");
+    var data = await resp.json();
+
+    if (data.error || !data.neighbors || data.neighbors.length === 0) {
+      pickerEl.innerHTML = '<p class="output-msg" style="margin:6px 8px">No alternatives found.</p>';
+      return;
+    }
+
+    pickerEl.innerHTML = '<div class="setlist-picker-label">Replace with:</div>';
+
+    data.neighbors.forEach(function (nbr) {
+      var row = document.createElement("div");
+      row.className = "setlist-picker-row";
+
+      var nameEl = document.createElement("span");
+      nameEl.className = "setlist-picker-name";
+      nameEl.textContent = nbr.label;
+
+      var metaEl = document.createElement("span");
+      metaEl.className = "setlist-picker-meta";
+      metaEl.textContent = String(nbr.bpm) + " BPM \u00B7 " + nbr.key;
+
+      row.appendChild(nameEl);
+      row.appendChild(metaEl);
+
+      row.addEventListener("click", function () {
+        replaceSetlistSong(index, nbr.id);
+      });
+
+      pickerEl.appendChild(row);
+    });
+  } catch (_err) {
+    pickerEl.innerHTML = '<p class="output-msg" style="margin:6px 8px">Failed to load alternatives.</p>';
+  }
+}
+
+/** Toggle the neighbor picker for the card at the given index. */
+function onSetlistCardClick(index, nodeId, flow) {
+  if (activeSetlistIndex === index) {
+    // Second click: collapse
+    activeSetlistIndex = -1;
+  } else {
+    activeSetlistIndex = index;
+  }
+  // Re-render the flow in place (preserves header)
+  var outputEl = document.getElementById("setlist-output");
+  var oldFlow = outputEl.querySelector(".path-flow");
+  var newFlow = buildSetlistFlow(setlistNodes);
+  outputEl.replaceChild(newFlow, oldFlow);
+}
+
+/** Swap one song in the setlist and re-render. */
+function replaceSetlistSong(index, newNodeId) {
+  setlistNodes[index] = newNodeId;
+  activeSetlistIndex = -1;
+  renderSetlistOutput();
+  // Highlight nodes only — edges may not align after manual swap
+  applyPathHighlights(setlistNodes, []);
+}
+
 // =========================================================================
-// 8. Bootstrap
+// 9. Tab navigation
+// =========================================================================
+
+document.querySelectorAll(".tab-btn").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var tabId = btn.dataset.tab;
+    document.querySelectorAll(".tab-btn").forEach(function (b) {
+      b.classList.remove("active");
+    });
+    document.querySelectorAll(".tab-panel").forEach(function (p) {
+      p.classList.remove("active");
+    });
+    btn.classList.add("active");
+    document.getElementById("tab-" + tabId).classList.add("active");
+  });
+});
+
+// =========================================================================
+// 9. Bootstrap
 // =========================================================================
 
 startPolling();

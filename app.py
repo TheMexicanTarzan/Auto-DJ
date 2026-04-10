@@ -32,8 +32,9 @@ from pydantic import BaseModel
 
 from collections import defaultdict
 
-from src.config import CACHE_PATH, SONGS_DIRECTORY, _LEGACY_JSON_CACHE
+from src.config import CACHE_PATH, SETLISTS_DIRECTORY, SONGS_DIRECTORY, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
+from src.setlist_saver import save_setlist
 from src.utils import analyse_new_songs, discover_changes, scan_directory
 
 # ---------------------------------------------------------------------------
@@ -101,6 +102,7 @@ def _load_graph_background() -> None:
                 songs = scan_directory(
                     SONGS_DIRECTORY,
                     progress_callback=_progress_callback,
+                    exclude_dirs={SETLISTS_DIRECTORY},
                 )
             except (NotADirectoryError, OSError) as exc:
                 logger.warning(
@@ -145,6 +147,7 @@ def _load_graph_background() -> None:
         try:
             new_paths, removed_hashes = discover_changes(
                 SONGS_DIRECTORY, graph.known_hashes,
+                exclude_dirs={SETLISTS_DIRECTORY},
             )
         except (NotADirectoryError, OSError) as exc:
             logger.warning("Cannot scan directory for changes: %s", exc)
@@ -399,13 +402,14 @@ def api_songs(request: Request):
 class PathRequest(BaseModel):
     start: str
     end: str
+    waypoints: list[str] | None = None  # ordered intermediate stops
     allowed_types: list[str] | None = None
     excluded_dirs: list[str] | None = None
 
 
 @app.post("/api/path")
 def api_path(req: PathRequest):
-    """Compute shortest path between two songs."""
+    """Compute the shortest mix path, optionally through one or more waypoints."""
     graph = _get_graph()
     if graph is None:
         return _orjson_response({"error": "Graph not ready"}, status_code=503)
@@ -416,63 +420,142 @@ def api_path(req: PathRequest):
             status_code=400,
         )
 
-    if req.start == req.end:
-        try:
-            song = graph.get_song(req.start)
-        except KeyError as exc:
-            return _orjson_response({"error": str(exc)}, status_code=404)
-        return _orjson_response({
-            "path_nodes": [song.file_path],
-            "path_edges": [],
-            "summary": f"Start and destination are the same track:\n  {song.filename}",
-            "total_cost": 0.0,
-        })
+    # Full ordered list of stops: [start, ...waypoints, end]
+    stops = [req.start] + (req.waypoints or []) + [req.end]
 
     allowed = set(req.allowed_types) if req.allowed_types else None
     excluded = set(req.excluded_dirs) if req.excluded_dirs else None
 
-    try:
-        path, total_cost = graph.get_shortest_path(
-            req.start, req.end,
-            allowed_types=allowed,
-            excluded_dirs=excluded,
-            songs_directory=SONGS_DIRECTORY,
-        )
-    except NoPathError:
-        return _orjson_response({
-            "error": (
-                "No mixable path exists between these two tracks.\n"
-                "The BPM gap at every intermediate step is too large."
-            ),
-        }, status_code=404)
-    except KeyError as exc:
-        return _orjson_response({"error": f"Song not found: {exc}"}, status_code=404)
+    full_path: list = []
+    path_edges: list = []
+    total_cost = 0.0
 
-    # Build text summary using stored edge weights
-    lines = ["SHORTEST MIX PATH", "=" * 40]
-    path_node_ids = [s.file_path for s in path]
-    path_edges = []
+    for i in range(len(stops) - 1):
+        seg_start, seg_end = stops[i], stops[i + 1]
 
-    for i, song in enumerate(path):
-        prefix = "START" if i == 0 else f"  [{i}]"
-        lines.append(f"{prefix}  {song.filename}")
-        lines.append(f"        BPM: {song.bpm}  |  Key: {song.key}")
+        if seg_start == seg_end:
+            # Same node – ensure it appears once then move on
+            if not full_path:
+                try:
+                    full_path.append(graph.get_song(seg_start))
+                except KeyError as exc:
+                    return _orjson_response({"error": str(exc)}, status_code=404)
+            continue
 
-        if i < len(path) - 1:
-            hop_cost, edge_type = graph.edge_info(
-                song.file_path, path[i + 1].file_path,
+        try:
+            seg_path, seg_cost = graph.get_shortest_path(
+                seg_start, seg_end,
+                allowed_types=allowed,
+                excluded_dirs=excluded,
+                songs_directory=SONGS_DIRECTORY,
             )
-            lines.append(f"          -> cost: {hop_cost:.4f} ({edge_type})")
-            path_edges.append([song.file_path, path[i + 1].file_path])
+        except NoPathError:
+            stop_num = i + 1
+            return _orjson_response({
+                "error": (
+                    f"No mixable path exists between stop {stop_num} and "
+                    f"stop {stop_num + 1}. "
+                    "The BPM gap at every intermediate step is too large."
+                ),
+            }, status_code=404)
+        except KeyError as exc:
+            return _orjson_response({"error": f"Song not found: {exc}"}, status_code=404)
 
-    lines.append("-" * 40)
-    lines.append(f"Total cost: {total_cost:.4f}  |  Hops: {len(path) - 1}")
+        # Concatenate segments – the junction node was already added as the
+        # last node of the previous segment, so skip seg_path[0].
+        if full_path:
+            full_path.extend(seg_path[1:])
+        else:
+            full_path.extend(seg_path)
+
+        total_cost += seg_cost
+
+        for j in range(len(seg_path) - 1):
+            path_edges.append([seg_path[j].file_path, seg_path[j + 1].file_path])
+
+    # Degenerate case: all stops resolved to the same node
+    if not full_path:
+        try:
+            full_path = [graph.get_song(req.start)]
+        except KeyError as exc:
+            return _orjson_response({"error": str(exc)}, status_code=404)
+
+    n = len(full_path)
+    hops = n - 1
+    summary = f"{n} track{'s' if n != 1 else ''} · {hops} hop{'s' if hops != 1 else ''}"
 
     return _orjson_response({
-        "path_nodes": path_node_ids,
+        "path_nodes": [s.file_path for s in full_path],
         "path_edges": path_edges,
-        "summary": "\n".join(lines),
+        "summary": summary,
         "total_cost": total_cost,
+    })
+
+
+class SetlistRequest(BaseModel):
+    min_bpm: float = 0.0
+    max_bpm: float = 999.0
+    target_duration_min: float = 60.0   # desired total set length in minutes
+    starting_key: str | None = None     # key of the first track (optional)
+    set_key: str | None = None          # key constraint for all tracks (optional)
+    allowed_types: list[str] | None = None
+
+
+@app.post("/api/setlist")
+def api_setlist(req: SetlistRequest):
+    """Generate a randomised continuous setlist matching the given criteria."""
+    graph = _get_graph()
+    if graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
+
+    if req.min_bpm > req.max_bpm:
+        return _orjson_response(
+            {"error": "min_bpm must be ≤ max_bpm."}, status_code=400
+        )
+
+    target_sec = req.target_duration_min * 60.0
+    allowed = set(req.allowed_types) if req.allowed_types else None
+
+    try:
+        songs = graph.generate_setlist(
+            min_bpm=req.min_bpm,
+            max_bpm=req.max_bpm,
+            target_sec=target_sec,
+            starting_key=req.starting_key or None,
+            set_key=req.set_key or None,
+            allowed_types=allowed,
+        )
+    except ValueError as exc:
+        return _orjson_response({"error": str(exc)}, status_code=400)
+
+    # Build path_edges for graph highlighting (consecutive pairs only)
+    path_edges: list = []
+    for i in range(len(songs) - 1):
+        a_id, b_id = songs[i].file_path, songs[i + 1].file_path
+        try:
+            va = graph.graph.vs.find(name=a_id)
+            vb = graph.graph.vs.find(name=b_id)
+            eid = graph.graph.get_eid(va.index, vb.index, directed=False, error=False)
+            if eid >= 0:
+                path_edges.append([a_id, b_id])
+        except Exception:
+            pass
+
+    _FALLBACK = 210.0
+    total_sec = sum(
+        s.duration_sec if s.duration_sec > 0 else _FALLBACK for s in songs
+    )
+    total_min = total_sec / 60.0
+    n = len(songs)
+    summary = (
+        f"{n} track{'s' if n != 1 else ''}"
+        f" \u00B7 ~{total_min:.0f} min"
+    )
+
+    return _orjson_response({
+        "path_nodes": [s.file_path for s in songs],
+        "path_edges": path_edges,
+        "summary": summary,
     })
 
 
@@ -510,6 +593,31 @@ def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K, types: str | None = Non
             }
             for nbr, cost, etype in top_k
         ],
+    })
+
+
+class SaveSetlistRequest(BaseModel):
+    setlist_name: str
+    track_paths: list[str]
+
+
+@app.post("/api/save_setlist")
+def api_save_setlist(req: SaveSetlistRequest):
+    """Copy the setlist tracks into a numbered subfolder of SETLISTS_DIRECTORY."""
+    if not req.track_paths:
+        return _orjson_response({"error": "No tracks provided."}, status_code=400)
+
+    try:
+        output_dir = save_setlist(req.track_paths, req.setlist_name, SETLISTS_DIRECTORY)
+    except OSError as exc:
+        return _orjson_response(
+            {"error": f"Could not write files: {exc}"}, status_code=500
+        )
+
+    return _orjson_response({
+        "success": True,
+        "output_dir": output_dir,
+        "message": f"Saved to {output_dir}",
     })
 
 

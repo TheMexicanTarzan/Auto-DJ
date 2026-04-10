@@ -99,9 +99,21 @@ def _file_hash(path: Path, chunk_size: int = 65_536) -> str:
     return sha.hexdigest()
 
 
+def _under_excluded(path: Path, exclude_dirs: set[Path]) -> bool:
+    """Return True if *path* is inside any of the *exclude_dirs* subtrees."""
+    for excl in exclude_dirs:
+        try:
+            path.relative_to(excl)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
 def scan_directory(
     directory: str | Path,
     progress_callback: callable | None = None,
+    exclude_dirs: set[Path] | None = None,
 ) -> list[Song]:
     """
     Recursively scan *directory* for audio files and return a deduplicated
@@ -144,9 +156,14 @@ def scan_directory(
     unique_paths: list[Path] = []
     skipped = 0
 
+    _excluded: set[Path] = {e.resolve() for e in (exclude_dirs or set())}
+
     # Walk the tree, sorted for deterministic ordering across runs
     audio_files = sorted(
-        p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        p for p in root.rglob("*")
+        if p.is_file()
+        and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        and not _under_excluded(p, _excluded)
     )
 
     total = len(audio_files)
@@ -207,20 +224,21 @@ def scan_directory(
             audio_list = [(a.audio, a.sr) for a in chunk_analyses]
             embeddings = compute_embeddings_batch(audio_list, batch_size=_CHUNK_SIZE)
 
-            # 2c. Build Song objects — raw audio is released when
-            #     chunk_analyses goes out of scope at next iteration.
-            for analysis, embedding in zip(chunk_analyses, embeddings):
-                songs.append(Song(
-                    file_path=analysis.file_path,
-                    filename=analysis.filename,
-                    bpm=analysis.bpm,
-                    key=analysis.key,
-                    embedding=embedding,
-                    beat_times=analysis.beat_times,
-                    downbeat_times=analysis.downbeat_times,
-                    content_hash=path_to_hash.get(Path(analysis.file_path), ""),
-                    fingerprint=analysis.fingerprint,
-                ))
+        # 2c. Build Song objects — raw audio is released when
+        #     chunk_analyses goes out of scope at next iteration.
+        for analysis, embedding in zip(chunk_analyses, embeddings):
+            songs.append(Song(
+                file_path=analysis.file_path,
+                filename=analysis.filename,
+                bpm=analysis.bpm,
+                key=analysis.key,
+                embedding=embedding,
+                beat_times=analysis.beat_times,
+                downbeat_times=analysis.downbeat_times,
+                content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+                fingerprint=analysis.fingerprint,
+                duration_sec=analysis.duration_sec,
+            ))
 
     # --- Phase 3: fingerprint-based deduplication ---
     # Catches cross-format / cross-album duplicates that SHA-256 misses
@@ -258,6 +276,7 @@ def scan_directory(
 def discover_changes(
     directory: str | Path,
     known_hashes: set[str],
+    exclude_dirs: set[Path] | None = None,
 ) -> tuple[list[Path], set[str]]:
     """
     Scan *directory* for audio files and compare against *known_hashes*
@@ -274,9 +293,13 @@ def discover_changes(
     if not root.is_dir():
         raise NotADirectoryError(f"Not a valid directory: {root}")
 
+    _excluded: set[Path] = {e.resolve() for e in (exclude_dirs or set())}
+
     audio_files = sorted(
         p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        if p.is_file()
+        and p.suffix.lower() in SUPPORTED_EXTENSIONS
+        and not _under_excluded(p, _excluded)
     )
 
     on_disk_hashes: set[str] = set()
@@ -362,18 +385,19 @@ def analyse_new_songs(
             audio_list = [(a.audio, a.sr) for a in chunk_analyses]
             embeddings = compute_embeddings_batch(audio_list, batch_size=_CHUNK_SIZE)
 
-            for analysis, embedding in zip(chunk_analyses, embeddings):
-                songs.append(Song(
-                    file_path=analysis.file_path,
-                    filename=analysis.filename,
-                    bpm=analysis.bpm,
-                    key=analysis.key,
-                    embedding=embedding,
-                    beat_times=analysis.beat_times,
-                    downbeat_times=analysis.downbeat_times,
-                    content_hash=path_to_hash.get(Path(analysis.file_path), ""),
-                    fingerprint=analysis.fingerprint,
-                ))
+        for analysis, embedding in zip(chunk_analyses, embeddings):
+            songs.append(Song(
+                file_path=analysis.file_path,
+                filename=analysis.filename,
+                bpm=analysis.bpm,
+                key=analysis.key,
+                embedding=embedding,
+                beat_times=analysis.beat_times,
+                downbeat_times=analysis.downbeat_times,
+                content_hash=path_to_hash.get(Path(analysis.file_path), ""),
+                fingerprint=analysis.fingerprint,
+                duration_sec=analysis.duration_sec,
+            ))
 
     # Fingerprint dedup against existing graph songs
     if known_fingerprints:

@@ -1,4 +1,4 @@
-/* Auto-DJ Mix Pathfinder — Dark Theme */
+/* Auto-DJ Mix Pathfinder — Dark Theme (60-30-10) */
 
 *,
 *::before,
@@ -11,28 +11,28 @@
 html, body {
   height: 100%;
   font-family: 'Segoe UI', Roboto, sans-serif;
-  background-color: #1a202c;
-  color: #e2e8f0;
+  background-color: #000000; /* 60% Canvas */
+  color: #F3F4F6;
   overflow: hidden;
 }
 
 /* ---- Header ---- */
 
 header {
-  background: linear-gradient(135deg, #2d3748, #4a5568);
+  background: #1E1E1E; /* 30% Structure */
   padding: 20px 30px;
-  border-bottom: 2px solid #e53e3e;
+  border-bottom: 2px solid #39FF14; /* 10% Action */
 }
 
 header h1 {
   font-size: 28px;
-  color: #e2e8f0;
+  color: #FFFFFF;
   margin: 0;
 }
 
 header p {
   margin: 5px 0 0 0;
-  color: #a0aec0;
+  color: #9CA3AF;
   font-size: 14px;
 }
 
@@ -48,30 +48,30 @@ header p {
 }
 
 #loading-overlay h2 {
-  color: #e2e8f0;
+  color: #FFFFFF;
   margin-bottom: 20px;
 }
 
 .progress-track {
   width: 60%;
   max-width: 500px;
-  background-color: #2d3748;
+  background-color: #1E1E1E;
   border-radius: 8px;
   overflow: hidden;
   height: 30px;
-  border: 1px solid #4a5568;
+  border: 1px solid #2D2D2D;
 }
 
 .progress-fill {
   width: 0%;
   height: 100%;
-  background-color: #e53e3e;
+  background-color: #39FF14;
   transition: width 0.5s ease;
   border-radius: 8px;
 }
 
 #progress-text {
-  color: #a0aec0;
+  color: #9CA3AF;
   margin-top: 12px;
   font-size: 14px;
 }
@@ -92,20 +92,16 @@ header p {
 aside {
   width: 360px;
   min-width: 360px;
-  background-color: #2d3748;
-  padding: 20px;
-  overflow-y: auto;
-  border-right: 1px solid #4a5568;
-}
-
-aside h3 {
-  margin-top: 0;
-  color: #e2e8f0;
+  background-color: #1E1E1E;
+  border-right: 1px solid #2D2D2D;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 aside label {
   font-size: 13px;
-  color: #a0aec0;
+  color: #9CA3AF;
   display: block;
   margin-bottom: 4px;
 }
@@ -114,22 +110,61 @@ aside label {
   width: 70px;
   padding: 6px 8px;
   margin-bottom: 12px;
-  background-color: #4a5568;
-  color: #e2e8f0;
-  border: 1px solid #4a5568;
+  background-color: #2D2D2D;
+  color: #FFFFFF;
+  border: 1px solid #2D2D2D;
   border-radius: 6px;
   font-size: 14px;
   outline: none;
 }
 
 #top-k-input:focus {
-  border-color: #e53e3e;
+  border-color: #39FF14;
 }
 
-aside hr {
+/* ---- Tab navigation ---- */
+
+.tab-nav {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 2px solid #2D2D2D;
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 11px 2px;
+  background: none;
   border: none;
-  border-top: 1px solid #4a5568;
-  margin: 20px 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  color: #9CA3AF;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-btn:hover {
+  color: #FFFFFF;
+}
+
+.tab-btn.active {
+  color: #FFFFFF;
+  border-bottom-color: #39FF14;
+}
+
+.tab-panel {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.tab-panel.active {
+  display: block;
 }
 
 /* ---- Search inputs ---- */
@@ -142,20 +177,20 @@ aside hr {
 .search-wrapper input {
   width: 100%;
   padding: 8px 10px;
-  background-color: #4a5568;
-  color: #e2e8f0;
-  border: 1px solid #4a5568;
+  background-color: #2D2D2D;
+  color: #FFFFFF;
+  border: 1px solid #2D2D2D;
   border-radius: 6px;
   font-size: 14px;
   outline: none;
 }
 
 .search-wrapper input:focus {
-  border-color: #e53e3e;
+  border-color: #39FF14;
 }
 
 .search-wrapper input::placeholder {
-  color: #a0aec0;
+  color: #9CA3AF;
 }
 
 .search-results {
@@ -166,8 +201,8 @@ aside hr {
   right: 0;
   max-height: 200px;
   overflow-y: auto;
-  background-color: #2d3748;
-  border: 1px solid #4a5568;
+  background-color: #1E1E1E;
+  border: 1px solid #2D2D2D;
   border-radius: 0 0 6px 6px;
   z-index: 100;
 }
@@ -180,7 +215,7 @@ aside hr {
   padding: 6px 10px;
   cursor: pointer;
   font-size: 13px;
-  color: #e2e8f0;
+  color: #FFFFFF;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -188,28 +223,178 @@ aside hr {
 
 .search-results .result-item:hover,
 .search-results .result-item.active {
-  background-color: #4a5568;
+  background-color: #2D2D2D;
+}
+
+/* ---- Waypoint rows ---- */
+
+.waypoint-row {
+  position: relative;
+  margin-bottom: 4px;
+}
+
+.waypoint-row label {
+  font-size: 13px;
+  color: #9CA3AF;
+  margin-bottom: 4px;
+}
+
+.waypoint-row .search-wrapper {
+  padding-right: 26px;
+  margin-bottom: 0;
+}
+
+.waypoint-remove-btn {
+  position: absolute;
+  right: 0;
+  top: 22px;
+  width: 22px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: #9CA3AF;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+  transition: color 0.15s;
+}
+
+.waypoint-remove-btn:hover {
+  color: #39FF14;
+}
+
+/* ---- Add waypoint button ---- */
+
+#add-waypoint-btn {
+  width: 100%;
+  padding: 7px;
+  margin-bottom: 12px;
+  background-color: transparent;
+  color: #9CA3AF;
+  border: 1px dashed #2D2D2D;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+#add-waypoint-btn:hover {
+  color: #FFFFFF;
+  border-color: #9CA3AF;
+}
+
+/* ---- Buttons ---- */
+
+#find-path-btn {
+  width: 100%;
+  padding: 10px;
+  background-color: #39FF14;
+  color: #000000; /* Black text for contrast */
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: bold;
+  transition: background-color 0.15s;
+}
+
+#find-path-btn:hover {
+  background-color: #32D612; /* Slightly darker green on hover */
+}
+
+#find-path-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---- Generic output message ---- */
+
+.output-msg {
+  color: #9CA3AF;
+  font-size: 13px;
+}
+
+/* ---- Path flow display ---- */
+
+#path-output {
+  margin-top: 18px;
+  font-size: 13px;
+  color: #FFFFFF;
+}
+
+.path-flow {
+  display: flex;
+  flex-direction: column;
+}
+
+.path-flow-card {
+  padding: 10px 12px;
+  background-color: #000000;
+  border: 1px solid #2D2D2D;
+  border-radius: 6px;
+}
+
+.path-flow-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #FFFFFF;
+  margin-bottom: 4px;
+}
+
+.path-flow-card-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #9CA3AF;
+}
+
+.path-flow-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 3px 0;
+  color: #39FF14;
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+}
+
+.path-flow-arrow .edge-badge {
+  margin-left: 0;
+}
+
+/* ---- Settings tab sub-sections ---- */
+
+.settings-section {
+  margin-bottom: 24px;
+}
+
+.settings-section-title {
+  font-size: 11px;
+  color: #9CA3AF;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #2D2D2D;
 }
 
 /* ---- Directory filter tree ---- */
 
 #directory-filter {
-  margin-bottom: 12px;
   padding: 10px;
-  background-color: #1a202c;
-  border: 1px solid #4a5568;
+  background-color: #000000;
+  border: 1px solid #2D2D2D;
   border-radius: 6px;
 }
 
-#directory-filter > .filter-label {
-  display: block;
-  font-size: 12px;
-  color: #a0aec0;
-  margin-bottom: 6px;
-}
-
 #directory-tree {
-  max-height: 240px;
   overflow-y: auto;
 }
 
@@ -233,7 +418,7 @@ aside hr {
 }
 
 .dir-row:hover {
-  background-color: rgba(74, 85, 104, 0.4);
+  background-color: #2D2D2D;
 }
 
 .dir-toggle {
@@ -241,13 +426,13 @@ aside hr {
   flex-shrink: 0;
   text-align: center;
   cursor: pointer;
-  color: #a0aec0;
+  color: #9CA3AF;
   font-size: 11px;
   user-select: none;
 }
 
 .dir-checkbox {
-  accent-color: #e53e3e;
+  accent-color: #39FF14;
   margin-right: 4px;
   vertical-align: middle;
   flex-shrink: 0;
@@ -255,7 +440,7 @@ aside hr {
 
 .dir-label {
   font-size: 13px;
-  color: #e2e8f0;
+  color: #FFFFFF;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -264,178 +449,373 @@ aside hr {
 
 .dir-count {
   font-size: 11px;
-  color: #718096;
+  color: #9CA3AF;
   margin-left: 6px;
   flex-shrink: 0;
 }
 
-/* ---- Tempo type filter checkboxes ---- */
+/* ---- Connection filter checkboxes ---- */
 
-#tempo-type-filters {
-  margin-bottom: 12px;
+#connection-filter {
+  display: flex;
+  gap: 12px;
   padding: 10px;
-  background-color: #1a202c;
-  border: 1px solid #4a5568;
+  background-color: #000000;
+  border: 1px solid #2D2D2D;
   border-radius: 6px;
 }
 
-#tempo-type-filters .filter-label {
-  display: block;
-  font-size: 12px;
-  color: #a0aec0;
-  margin-bottom: 6px;
-}
-
-#tempo-type-filters label {
-  display: inline-block;
+#connection-filter label {
+  display: inline-flex;
+  align-items: center;
   font-size: 13px;
-  color: #e2e8f0;
-  margin-right: 10px;
+  color: #FFFFFF;
+  margin-bottom: 0;
   cursor: pointer;
 }
 
-#tempo-type-filters input[type="checkbox"] {
-  accent-color: #e53e3e;
-  margin-right: 3px;
+#connection-filter input[type="checkbox"] {
+  accent-color: #39FF14;
+  margin-right: 4px;
+}
+
+/* ---- Node details structured display ---- */
+
+#node-details {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #FFFFFF;
+}
+
+.node-header {
+  padding: 12px;
+  background-color: #000000;
+  border: 1px solid #2D2D2D;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.node-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #FFFFFF;
+  margin-bottom: 6px;
+}
+
+.node-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  color: #9CA3AF;
+  margin-bottom: 4px;
+}
+
+.node-path {
+  font-size: 11px;
+  color: #9CA3AF;
+  word-break: break-all;
+  margin-top: 4px;
+}
+
+.neighbors-heading {
+  font-size: 11px;
+  color: #9CA3AF;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.neighbors-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.neighbors-table th {
+  text-align: left;
+  color: #9CA3AF;
+  font-weight: 500;
+  padding: 4px 6px;
+  border-bottom: 1px solid #2D2D2D;
+}
+
+.neighbors-table td {
+  padding: 5px 6px;
+  color: #FFFFFF;
+  border-bottom: 1px solid #1E1E1E;
+  vertical-align: top;
+}
+
+.neighbors-table tr:last-child td {
+  border-bottom: none;
+}
+
+.neighbors-table .col-rank {
+  color: #9CA3AF;
+  width: 24px;
+}
+
+/* Edge Badges - Keeping these distinct from neon green so they don't look like primary actions */
+.edge-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  margin-left: 4px;
   vertical-align: middle;
 }
 
-/* ---- Weight controls ---- */
-
-.weight-controls {
-  margin-bottom: 10px;
+.edge-badge--direct {
+  background-color: #2D2D2D;
+  color: #9CA3AF;
 }
 
-.weight-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
+.edge-badge--double {
+  background-color: #166534;
+  color: #4ade80;
 }
 
-.weight-row label {
-  flex: 1;
+.edge-badge--triplet {
+  background-color: #1e3a8a;
+  color: #60a5fa;
+}
+
+.no-neighbors {
+  color: #9CA3AF;
   font-size: 13px;
-  color: #a0aec0;
+  font-style: italic;
+  padding: 8px 0;
+}
+
+/* ---- Create Setlist form ---- */
+
+.setlist-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.sl-row {
+  display: flex;
+  gap: 10px;
+}
+
+.sl-row .sl-field {
+  flex: 1;
+}
+
+.sl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sl-field label {
+  font-size: 12px;
+  color: #9CA3AF;
   margin-bottom: 0;
 }
 
-.weight-row input[type="number"] {
-  width: 70px;
-  padding: 4px 6px;
-  background-color: #4a5568;
-  color: #e2e8f0;
-  border: 1px solid #4a5568;
-  border-radius: 4px;
+.sl-field input[type="number"],
+.sl-field select {
+  width: 100%;
+  padding: 8px 10px;
+  background-color: #2D2D2D;
+  color: #FFFFFF;
+  border: 1px solid #2D2D2D;
+  border-radius: 6px;
   font-size: 13px;
+  font-family: inherit;
   outline: none;
-  text-align: right;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
-.weight-row input[type="number"]:focus {
-  border-color: #e53e3e;
+.sl-field input[type="number"]:focus,
+.sl-field select:focus {
+  border-color: #39FF14;
 }
 
-#recalculate-btn {
-  width: 100%;
-  padding: 8px;
-  background-color: #4a5568;
-  color: #e2e8f0;
-  border: 1px solid #718096;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  margin-bottom: 4px;
-  transition: background-color 0.15s;
+.sl-field select option {
+  background-color: #1E1E1E;
 }
 
-#recalculate-btn:hover {
-  background-color: #718096;
-}
-
-#recalculate-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-#recalculate-status {
-  font-size: 12px;
-  color: #a0aec0;
-  min-height: 16px;
-  margin-bottom: 4px;
-}
-
-/* ---- Buttons ---- */
-
-#recompute-layout-btn {
-  width: 100%;
-  padding: 8px;
-  background-color: #4a5568;
-  color: #e2e8f0;
-  border: 1px solid #718096;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  margin-bottom: 4px;
-  transition: background-color 0.15s;
-}
-
-#recompute-layout-btn:hover {
-  background-color: #718096;
-}
-
-#recompute-layout-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-#layout-status {
-  font-size: 12px;
-  color: #a0aec0;
-  min-height: 16px;
-}
-
-#find-path-btn {
+#generate-setlist-btn {
   width: 100%;
   padding: 10px;
-  background-color: #e53e3e;
-  color: #ffffff;
+  background-color: #39FF14;
+  color: #000000;
   border: none;
   border-radius: 6px;
   cursor: pointer;
   font-size: 15px;
   font-weight: bold;
+  font-family: inherit;
   transition: background-color 0.15s;
 }
 
-#find-path-btn:hover {
-  background-color: #c53030;
+#generate-setlist-btn:hover {
+  background-color: #32D612;
 }
 
-#find-path-btn:disabled {
+#generate-setlist-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* ---- Output panels ---- */
+/* ---- Setlist output ---- */
 
-#path-output,
-#node-details {
-  margin-top: 18px;
-  padding: 14px;
-  background-color: #1a202c;
-  border-radius: 6px;
+#setlist-output {
   font-size: 13px;
-  white-space: pre-wrap;
-  max-height: 260px;
-  overflow-y: auto;
-  border: 1px solid #4a5568;
-  font-family: 'Consolas', 'Monaco', monospace;
-  line-height: 1.5;
+  color: #FFFFFF;
 }
 
-#node-details {
-  max-height: 280px;
+.setlist-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.setlist-summary {
+  color: #9CA3AF;
+  font-size: 13px;
+}
+
+/* ---- Setlist name input ---- */
+
+.setlist-name-row {
+  margin-bottom: 10px;
+}
+
+.setlist-name-input {
+  width: 100%;
+  padding: 8px 10px;
+  background-color: #2D2D2D;
+  color: #FFFFFF;
+  border: 1px solid #2D2D2D;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.setlist-name-input:focus {
+  border-color: #39FF14;
+}
+
+.setlist-name-input::placeholder {
+  color: #9CA3AF;
+}
+
+/* ---- Save setlist button ---- */
+
+.save-setlist-btn {
+  flex-shrink: 0;
+  padding: 5px 12px;
+  background-color: #2D2D2D;
+  color: #FFFFFF;
+  border: 1px solid #9CA3AF;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.save-setlist-btn:hover:not(:disabled) {
+  background-color: #9CA3AF;
+  color: #000000;
+}
+
+.save-setlist-btn--saved {
+  background-color: #39FF14;
+  color: #000000;
+  border-color: #39FF14;
+  cursor: default;
+}
+
+.save-setlist-btn:disabled {
+  cursor: not-allowed;
+}
+
+/* ---- Setlist save error ---- */
+
+.setlist-save-error {
+  font-size: 12px;
+  color: #FF6B6B;
+  margin: 6px 0 10px;
+}
+
+/* ---- Setlist interactive cards ---- */
+
+.path-flow-card--interactive {
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.path-flow-card--interactive:hover {
+  border-color: #9CA3AF; /* Fixed: Replaced old slate gray */
+  background-color: #1E1E1E; /* Fixed: Replaced old blue-gray */
+}
+
+.path-flow-card--active {
+  border-color: #39FF14 !important; /* Fixed: Replaced old red with Neon Green */
+  background-color: #1E1E1E; /* Fixed: Replaced old blue-gray */
+}
+
+/* ---- Setlist neighbor picker ---- */
+
+.setlist-neighbor-picker {
+  background-color: #000000; /* Fixed: Replaced old dark blue with pure black */
+  border: 1px solid #39FF14; /* Fixed: Replaced old red with Neon Green */
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  overflow: hidden;
+  /* Connects visually to the active card above it */
+  margin-top: -1px;
+}
+
+.setlist-picker-label {
+  font-size: 10px;
+  color: #9CA3AF; /* Fixed: Replaced old slate gray */
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 6px 10px 4px;
+}
+
+.setlist-picker-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  cursor: pointer;
+  gap: 8px;
+  transition: background-color 0.1s;
+}
+
+.setlist-picker-row:hover {
+  background-color: #2D2D2D; /* Fixed: Replaced old slate gray with deep charcoal */
+}
+
+.setlist-picker-name {
+  font-size: 12px;
+  color: #FFFFFF; /* Fixed: Replaced old off-white with pure white */
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setlist-picker-meta {
+  font-size: 11px;
+  color: #9CA3AF; /* Fixed: Replaced old slate gray */
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* ---- Sigma container ---- */
@@ -443,5 +823,5 @@ aside hr {
 #sigma-container {
   flex: 1;
   position: relative;
-  background-color: #1a202c;
+  background-color: #000000;
 }

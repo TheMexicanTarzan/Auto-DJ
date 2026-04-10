@@ -25,77 +25,169 @@
 
   <!-- Main content (hidden until graph ready) -->
   <div id="main-content">
-    <!-- Left sidebar -->
+    <!-- Left sidebar with tabbed navigation -->
     <aside>
-      <h3>Pathfinding</h3>
 
-      <label for="start-search">Start Song</label>
-      <div class="search-wrapper">
-        <input type="text" id="start-search" placeholder="Search for a track..." autocomplete="off">
-        <div class="search-results" id="start-results"></div>
+      <div class="tab-nav">
+        <button class="tab-btn active" data-tab="track-details">Track Details</button>
+        <button class="tab-btn" data-tab="pathfinding">Pathfinding</button>
+        <button class="tab-btn" data-tab="create-setlist">Create Setlist</button>
+        <button class="tab-btn" data-tab="settings">Settings</button>
       </div>
 
-      <label for="end-search">Destination Song</label>
-      <div class="search-wrapper">
-        <input type="text" id="end-search" placeholder="Search for a track..." autocomplete="off">
-        <div class="search-results" id="end-results"></div>
-      </div>
-
-      <div id="directory-filter">
-        <span class="filter-label">Directory filter</span>
-        <div id="directory-tree"></div>
-      </div>
-
-      <div id="tempo-type-filters">
-        <span class="filter-label">Tempo relationship</span>
-        <label><input type="checkbox" id="filter-direct" checked> Direct</label>
-        <label><input type="checkbox" id="filter-double" checked> Double tempo</label>
-        <label><input type="checkbox" id="filter-triplet" checked> Triplet</label>
-      </div>
-
-      <button id="find-path-btn">Find Path</button>
-
-      <div id="path-output">Select two songs and click Find Path.</div>
-
-      <hr>
-
-      <h3>Edge Weights</h3>
-      <div class="weight-controls">
-        <div class="weight-row">
-          <label for="w-harmonic">Harmonic</label>
-          <input type="number" id="w-harmonic" value="0.35" step="0.05" min="0" max="1">
+      <!-- Tab 1: Track Details -->
+      <div class="tab-panel active" id="tab-track-details">
+        <label for="details-search">Search by name</label>
+        <div class="search-wrapper">
+          <input type="text" id="details-search" placeholder="Search for a track..." autocomplete="off">
+          <div class="search-results" id="details-results"></div>
         </div>
-        <div class="weight-row">
-          <label for="w-tempo">Tempo</label>
-          <input type="number" id="w-tempo" value="0.25" step="0.05" min="0" max="1">
-        </div>
-        <div class="weight-row">
-          <label for="w-semantic">Semantic</label>
-          <input type="number" id="w-semantic" value="0.40" step="0.05" min="0" max="1">
-        </div>
-        <div class="weight-row">
-          <label for="w-double">Double penalty</label>
-          <input type="number" id="w-double" value="0.00" step="0.05" min="0" max="2">
-        </div>
-        <div class="weight-row">
-          <label for="w-triplet">Triplet penalty</label>
-          <input type="number" id="w-triplet" value="0.00" step="0.05" min="0" max="2">
-        </div>
+        <label for="top-k-input">Neighbours to show</label>
+        <input type="number" id="top-k-input" value="10" min="1" max="50">
+        <div id="node-details"><p class="output-msg">Click a node on the graph or search above.</p></div>
       </div>
-      <button id="recalculate-btn">Recalculate</button>
-      <div id="recalculate-status"></div>
 
-      <hr>
+      <!-- Tab 2: Pathfinding -->
+      <div class="tab-panel" id="tab-pathfinding">
+        <label for="start-search">Start Song</label>
+        <div class="search-wrapper">
+          <input type="text" id="start-search" placeholder="Search for a track..." autocomplete="off">
+          <div class="search-results" id="start-results"></div>
+        </div>
 
-      <h3>Track Details</h3>
-      <label for="details-search">Search by name</label>
-      <div class="search-wrapper">
-        <input type="text" id="details-search" placeholder="Search for a track..." autocomplete="off">
-        <div class="search-results" id="details-results"></div>
+        <!-- Dynamically inserted waypoint rows land here -->
+        <div id="waypoints-container"></div>
+
+        <button id="add-waypoint-btn">+ Add Song</button>
+
+        <label for="end-search">Destination Song</label>
+        <div class="search-wrapper">
+          <input type="text" id="end-search" placeholder="Search for a track..." autocomplete="off">
+          <div class="search-results" id="end-results"></div>
+        </div>
+
+        <button id="find-path-btn">Find Path</button>
+
+        <div id="path-output"><p class="output-msg">Select songs and click Find Path.</p></div>
       </div>
-      <label for="top-k-input">Neighbours to show</label>
-      <input type="number" id="top-k-input" value="10" min="1" max="50">
-      <div id="node-details">Click a node on the graph or search above.</div>
+
+      <!-- Tab 3: Create Setlist -->
+      <div class="tab-panel" id="tab-create-setlist">
+
+        <div class="setlist-form">
+
+          <!-- BPM Range -->
+          <div class="sl-row">
+            <div class="sl-field">
+              <label for="sl-min-bpm">Min BPM</label>
+              <input type="number" id="sl-min-bpm" placeholder="e.g. 120" min="0" max="300" step="1">
+            </div>
+            <div class="sl-field">
+              <label for="sl-max-bpm">Max BPM</label>
+              <input type="number" id="sl-max-bpm" placeholder="e.g. 140" min="0" max="300" step="1">
+            </div>
+          </div>
+
+          <!-- Target Duration -->
+          <div class="sl-field">
+            <label for="sl-target-duration">Target Duration (minutes)</label>
+            <input type="number" id="sl-target-duration" value="60" min="1" step="1">
+          </div>
+
+          <!-- Starting Key -->
+          <div class="sl-field">
+            <label for="sl-starting-key">Starting Key (optional)</label>
+            <select id="sl-starting-key">
+              <option value="">Any key</option>
+              <option value="C major">C major</option>
+              <option value="C# major">C# major</option>
+              <option value="D major">D major</option>
+              <option value="D# major">D# major</option>
+              <option value="E major">E major</option>
+              <option value="F major">F major</option>
+              <option value="F# major">F# major</option>
+              <option value="G major">G major</option>
+              <option value="G# major">G# major</option>
+              <option value="A major">A major</option>
+              <option value="A# major">A# major</option>
+              <option value="B major">B major</option>
+              <option value="C minor">C minor</option>
+              <option value="C# minor">C# minor</option>
+              <option value="D minor">D minor</option>
+              <option value="D# minor">D# minor</option>
+              <option value="E minor">E minor</option>
+              <option value="F minor">F minor</option>
+              <option value="F# minor">F# minor</option>
+              <option value="G minor">G minor</option>
+              <option value="G# minor">G# minor</option>
+              <option value="A minor">A minor</option>
+              <option value="A# minor">A# minor</option>
+              <option value="B minor">B minor</option>
+            </select>
+          </div>
+
+          <!-- Set Key -->
+          <div class="sl-field">
+            <label for="sl-set-key">Set Key (optional)</label>
+            <select id="sl-set-key">
+              <option value="">Any key</option>
+              <option value="C major">C major</option>
+              <option value="C# major">C# major</option>
+              <option value="D major">D major</option>
+              <option value="D# major">D# major</option>
+              <option value="E major">E major</option>
+              <option value="F major">F major</option>
+              <option value="F# major">F# major</option>
+              <option value="G major">G major</option>
+              <option value="G# major">G# major</option>
+              <option value="A major">A major</option>
+              <option value="A# major">A# major</option>
+              <option value="B major">B major</option>
+              <option value="C minor">C minor</option>
+              <option value="C# minor">C# minor</option>
+              <option value="D minor">D minor</option>
+              <option value="D# minor">D# minor</option>
+              <option value="E minor">E minor</option>
+              <option value="F minor">F minor</option>
+              <option value="F# minor">F# minor</option>
+              <option value="G minor">G minor</option>
+              <option value="G# minor">G# minor</option>
+              <option value="A minor">A minor</option>
+              <option value="A# minor">A# minor</option>
+              <option value="B minor">B minor</option>
+            </select>
+          </div>
+
+          <button id="generate-setlist-btn">Generate Setlist</button>
+
+        </div>
+
+        <div id="setlist-output"></div>
+
+      </div>
+
+      <!-- Tab 4: Settings -->
+      <div class="tab-panel" id="tab-settings">
+
+        <!-- Section A: Directory Filter -->
+        <div class="settings-section" id="settings-dir-section">
+          <div class="settings-section-title">Directory Filter</div>
+          <div id="directory-filter">
+            <div id="directory-tree"></div>
+          </div>
+        </div>
+
+        <!-- Section B: Connection Filter -->
+        <div class="settings-section">
+          <div class="settings-section-title">Connection Filter</div>
+          <div id="connection-filter">
+            <label><input type="checkbox" id="filter-direct" checked> Direct</label>
+            <label><input type="checkbox" id="filter-triplet"> Triplet</label>
+            <label><input type="checkbox" id="filter-double"> Double</label>
+          </div>
+        </div>
+
+      </div>
 
     </aside>
 

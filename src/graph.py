@@ -37,6 +37,7 @@ import base64
 import json
 import logging
 import pickle
+import random
 from pathlib import Path
 
 import igraph
@@ -437,6 +438,7 @@ class DJGraph:
                 "embedding_b64": base64.b64encode(emb_bytes).decode("ascii"),
                 "content_hash": song.content_hash,
                 "fingerprint": song.fingerprint,
+                "duration_sec": song.duration_sec,
             })
 
         has_edge_type = "edge_type" in self.graph.es.attributes() if self.graph.ecount() > 0 else False
@@ -492,6 +494,7 @@ class DJGraph:
                 embedding=emb,
                 content_hash=s.get("content_hash", ""),
                 fingerprint=s.get("fingerprint", ""),
+                duration_sec=s.get("duration_sec", 0.0),
             )
             instance._songs[song.file_path] = song
             instance._filename_index[song.filename] = song
@@ -598,6 +601,7 @@ class DJGraph:
                 embedding=emb,
                 content_hash=s.get("content_hash", ""),
                 fingerprint=s.get("fingerprint", ""),
+                duration_sec=s.get("duration_sec", 0.0),
             )
             instance._songs[song.file_path] = song
             instance._filename_index[song.filename] = song
@@ -861,3 +865,123 @@ class DJGraph:
             other_v = self.graph.vs[other_idx]
             result.append((self._songs[other_v["name"]], edge["weight"], etype))
         return sorted(result, key=lambda x: x[1])
+
+    def generate_setlist(
+        self,
+        *,
+        min_bpm: float = 0.0,
+        max_bpm: float = 999.0,
+        target_sec: float = 3600.0,
+        starting_key: str | None = None,
+        set_key: str | None = None,
+        allowed_types: set[str] | None = None,
+        max_attempts: int = 60,
+    ) -> list[Song]:
+        """
+        Build a randomised continuous setlist by walking the mixing graph.
+
+        At each step a random edge-connected neighbour is chosen from those
+        satisfying the BPM and key constraints.  Multiple restarts are made
+        from different starting songs if a dead-end is hit before the target
+        duration is reached.
+
+        The first attempt that meets or exceeds *target_sec* is returned
+        immediately.  If no attempt reaches the target, the longest result
+        found across all attempts is returned instead.
+
+        Args:
+            min_bpm:       Minimum BPM for every track in the setlist.
+            max_bpm:       Maximum BPM for every track in the setlist.
+            target_sec:    Desired total duration in seconds.
+            starting_key:  If given, the first track must be in this key.
+            set_key:       If given, every track must be in this key.
+            allowed_types: Edge types to traverse (None = all types).
+            max_attempts:  Maximum number of random-walk restarts.
+
+        Returns:
+            An ordered list of Song objects representing the setlist.
+
+        Raises:
+            ValueError: If no valid candidates or start songs are found,
+                        or if no setlist could be generated at all.
+        """
+        # Tracks with unknown duration default to 3.5 minutes.
+        _FALLBACK_DURATION = 210.0
+
+        def song_duration(s: Song) -> float:
+            return s.duration_sec if s.duration_sec > 0 else _FALLBACK_DURATION
+
+        # Pre-build the allowed candidate set (BPM range + optional set_key).
+        allowed_pool: set[str] = {
+            s.file_path
+            for s in self._songs.values()
+            if min_bpm <= s.bpm <= max_bpm
+            and (set_key is None or s.key == set_key)
+        }
+
+        if not allowed_pool:
+            suffix = f" and key \u2018{set_key}\u2019" if set_key else ""
+            raise ValueError(
+                f"No songs match the specified BPM range{suffix}."
+            )
+
+        # Starting candidates: allowed pool filtered by starting_key.
+        start_pool: list[Song] = [
+            s for s in self._songs.values()
+            if s.file_path in allowed_pool
+            and (starting_key is None or s.key == starting_key)
+        ]
+
+        if not start_pool:
+            parts: list[str] = []
+            if starting_key:
+                parts.append(f"starting key \u2018{starting_key}\u2019")
+            if set_key and set_key != starting_key:
+                parts.append(f"set key \u2018{set_key}\u2019")
+            detail = " and ".join(parts) if parts else "the given constraints"
+            raise ValueError(
+                f"No songs match {detail} within the BPM range."
+            )
+
+        best_setlist: list[Song] = []
+        best_total: float = 0.0
+
+        for _ in range(max_attempts):
+            current = random.choice(start_pool)
+            setlist: list[Song] = [current]
+            visited: set[str] = {current.file_path}
+            total = song_duration(current)
+
+            while total < target_sec:
+                candidates: list[Song] = [
+                    nbr
+                    for nbr, _cost, _etype in self.neighbours(
+                        current.file_path, allowed_types=allowed_types
+                    )
+                    if nbr.file_path not in visited
+                    and nbr.file_path in allowed_pool
+                ]
+
+                if not candidates:
+                    break
+
+                next_song = random.choice(candidates)
+                setlist.append(next_song)
+                visited.add(next_song.file_path)
+                total += song_duration(next_song)
+                current = next_song
+
+            if total >= target_sec:
+                return setlist
+
+            if total > best_total:
+                best_total = total
+                best_setlist = setlist
+
+        if best_setlist:
+            return best_setlist
+
+        raise ValueError(
+            "Could not generate a setlist matching the criteria. "
+            "Try a wider BPM range, a longer duration, or removing the key filter."
+        )

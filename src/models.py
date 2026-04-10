@@ -34,6 +34,7 @@ class AudioAnalysis(NamedTuple):
     beat_times: list     # all detected beat times (seconds)
     downbeat_times: list # downbeat ("1") times (seconds)
     fingerprint: str     # Chromaprint audio fingerprint
+    duration_sec: float  # total audio duration in seconds
 
 # ---------------------------------------------------------------------------
 # CLAP model singleton — loaded once, shared across all Song instances.
@@ -242,7 +243,8 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
     y, sr = _load_audio(path)
 
     # Validate audio
-    duration = len(y) / sr
+    duration_sec = len(y) / sr
+    duration = duration_sec
     if duration < 1.0:
         raise ValueError(
             f"Audio too short ({duration:.2f}s): {path.name}. "
@@ -274,6 +276,7 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
         beat_times=beat_times,
         downbeat_times=downbeat_times,
         fingerprint=fingerprint,
+        duration_sec=duration_sec,
     )
 
 
@@ -365,6 +368,7 @@ class Song:
     downbeat_times: list[float] = field(default_factory=list)
     content_hash: str = ""
     fingerprint: str = ""
+    duration_sec: float = 0.0   # total audio duration; 0 means unknown
 
     # ------------------------------------------------------------------
     # Factory method — the primary way to create a Song from a file
@@ -392,7 +396,8 @@ class Song:
         y, sr = _load_audio(path)
 
         # --- 2. Validate audio --------------------------------------------
-        duration = len(y) / sr
+        duration_sec = len(y) / sr
+        duration = duration_sec
         if duration < 1.0:
             raise ValueError(
                 f"Audio too short ({duration:.2f}s): {path.name}. "
@@ -426,6 +431,7 @@ class Song:
             beat_times=beat_times,
             downbeat_times=downbeat_times,
             fingerprint=fingerprint,
+            duration_sec=duration_sec,
         )
 
     # ------------------------------------------------------------------
