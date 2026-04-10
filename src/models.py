@@ -9,6 +9,7 @@ and a semantic embedding vector that captures the 'vibe' of the track.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -299,12 +300,15 @@ def compute_embeddings_batch(
     model, processor = _get_clap_model()
     target_sr = 48_000
 
-    # Resample all audio to 48 kHz (CLAP's expected rate)
-    resampled = []
-    for y, sr in audio_list:
-        if sr != target_sr:
-            y = _resample(y, orig_sr=sr, target_sr=target_sr)
-        resampled.append(y)
+    # Resample all audio to 48 kHz in parallel.  Essentia's C++ Resample
+    # releases the GIL, so threads genuinely run concurrently.  Order is
+    # preserved by ThreadPoolExecutor.map().
+    def _resample_one(args: tuple[np.ndarray, int]) -> np.ndarray:
+        y, sr = args
+        return _resample(y, orig_sr=sr, target_sr=target_sr) if sr != target_sr else y
+
+    with ThreadPoolExecutor() as pool:
+        resampled = list(pool.map(_resample_one, audio_list))
 
     embeddings: list[np.ndarray] = []
 

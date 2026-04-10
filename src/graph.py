@@ -298,9 +298,9 @@ class DJGraph:
         if edge_list:
             existing_edge_count = self.graph.ecount()
             self.graph.add_edges(edge_list)
-            for i, w in enumerate(weight_list):
-                self.graph.es[existing_edge_count + i]["weight"] = w
-                self.graph.es[existing_edge_count + i]["edge_type"] = type_list[i]
+            new_es = self.graph.es[existing_edge_count:]
+            new_es["weight"] = weight_list
+            new_es["edge_type"] = type_list
 
         self._sorted_songs_cache = None
         self.compute_layout()
