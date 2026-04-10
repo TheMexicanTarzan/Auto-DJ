@@ -19,6 +19,11 @@ SONGS_DIRECTORY: str = str(Path(os.environ.get(
     str(_PROJECT_ROOT / ".." / 'Playlists'),
 )).resolve())
 
+# Directory where Auto-DJ generated setlists are saved.
+# Kept as a subfolder of SONGS_DIRECTORY so setlists travel with the library,
+# but explicitly excluded from graph analysis to avoid re-scanning the copies.
+SETLISTS_DIRECTORY: Path = Path(SONGS_DIRECTORY) / "Auto-dj setlists"
+
 # Disk cache for the serialised graph.  If this file exists the app
 # skips the expensive directory-scan + embedding step entirely.
 CACHE_PATH: Path = Path(

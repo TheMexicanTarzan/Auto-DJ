@@ -1,48 +1,32 @@
-"""setlist_saver.py — Copy a DJ setlist's audio files into a user-chosen directory."""
+"""setlist_saver.py — Save a DJ setlist to the Auto-dj setlists directory."""
 
 from __future__ import annotations
 
 import shutil
-import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog
 
 
-def save_setlist(track_paths: list[str], setlist_name: str) -> str:
-    """Prompt the user for a destination folder and copy tracks into a numbered subfolder.
-
-    Opens a native OS folder-picker dialog (hidden Tk root window).
+def save_setlist(track_paths: list[str], setlist_name: str, setlists_dir: Path) -> str:
+    """Copy ordered track files into a numbered subfolder of *setlists_dir*.
 
     Args:
         track_paths: Absolute file paths in setlist order.
-        setlist_name: Used as the output subfolder name.
+        setlist_name: Used as the output subfolder name (sanitised for the
+            file system).
+        setlists_dir: Parent directory that holds all saved setlists
+            (created automatically if it does not exist).
 
     Returns:
         Absolute path of the created output folder.
 
     Raises:
-        RuntimeError: If the user cancels the dialog without choosing a folder.
-        OSError: If a file cannot be copied.
+        OSError: If a file cannot be read or written.
     """
-    root = tk.Tk()
-    root.withdraw()
-    root.wm_attributes("-topmost", True)
-
-    dest_parent = filedialog.askdirectory(
-        parent=root,
-        title="Select destination folder for setlist",
-    )
-    root.destroy()
-
-    if not dest_parent:
-        raise RuntimeError("Cancelled by user.")
-
-    # Sanitise name for use as a filesystem directory
     safe_name = (
         "".join(c if c.isalnum() or c in " _-" else "_" for c in setlist_name).strip()
     ) or "Setlist"
 
-    output_dir = Path(dest_parent) / safe_name
+    output_dir = setlists_dir / safe_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for i, src_path_str in enumerate(track_paths, start=1):
