@@ -543,6 +543,35 @@ class TestIncrementalAdd:
         assert g.num_nodes == 2
         assert g.num_edges == 1
 
+    def test_incremental_edge_type_and_weight_set_correctly(self):
+        """
+        Regression test for the bulk EdgeSeq slice assignment introduced in
+        add_songs_incremental.  Verifies that both 'weight' and 'edge_type'
+        attributes are correctly written on the new edges (not None/missing),
+        covering the case where the per-edge Python loop was replaced with
+        es[existing_edge_count:]["weight"] = weight_list.
+        """
+        # Build a graph with one existing song+edge so existing_edge_count > 0
+        a = _song("a.mp3", bpm=120, key="C major", embedding=_SHARED_EMB)
+        b = _song("b.mp3", bpm=121, key="C major", embedding=_SHARED_EMB)
+        g = DJGraph.build([a, b])
+        assert g.num_edges == 1  # baseline: one existing edge
+
+        # Add a new song that is compatible with both a and b
+        c = _song("c.mp3", bpm=122, key="C major", embedding=_SHARED_EMB)
+        g.add_songs_incremental([c])
+
+        # Two new edges should exist: c↔a and c↔b
+        assert g.num_edges == 3
+
+        # edge_info returns (weight, edge_type); both must be valid
+        for source, target in [("a.mp3", "c.mp3"), ("b.mp3", "c.mp3")]:
+            w, etype = g.edge_info(source, target)
+            assert w < float("inf"), f"weight for {source}→{target} is inf"
+            assert etype in {"direct", "double", "triplet"}, (
+                f"edge_type for {source}→{target} is '{etype}', expected a valid label"
+            )
+
 
 class TestRemoveSongs:
     def test_remove_by_hash(self):
