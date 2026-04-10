@@ -49,6 +49,10 @@ _clap_model = None
 _clap_processor = None
 _clap_device = None
 
+# Length of each audio segment fed to MERT in one forward pass.
+# 30 s @ 24 kHz = 720 000 samples → keeps peak VRAM well below 2 GB.
+_EMBED_CHUNK_SEC = 30
+
 
 def _get_clap_model():
     """Lazy-load the MERT model and feature extractor on first use.
@@ -72,6 +76,8 @@ def _get_clap_model():
 
         _clap_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         _clap_model.to(_clap_device)
+        if _clap_device.type == "cuda":
+            _clap_model.half()  # float16 halves weight memory (~380 MB → ~190 MB)
         logger.info("MERT model loaded on device: %s", _clap_device)
 
     return _clap_model, _clap_processor
@@ -316,24 +322,39 @@ def compute_embeddings_batch(
         resampled = list(pool.map(_resample_one, audio_list))
 
     embeddings: list[np.ndarray] = []
+    chunk_samples = _EMBED_CHUNK_SEC * target_sr  # e.g. 30 s × 24 000 = 720 000
 
-    for i in range(0, len(resampled), batch_size):
-        batch = resampled[i : i + batch_size]
-        inputs = processor(
-            batch,
-            sampling_rate=target_sr,
-            return_tensors="pt",
-            padding=True,
-        )
-        inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = model(**inputs)
+    for y in resampled:
+        # Split the waveform into fixed-length segments.  Drop any trailing
+        # segment shorter than 1 s — too short to produce a reliable embedding.
+        # If the whole track is shorter than 1 s, fall back to the full audio.
+        chunks = [
+            y[s : s + chunk_samples]
+            for s in range(0, len(y), chunk_samples)
+            if len(y[s : s + chunk_samples]) >= target_sr
+        ]
+        if not chunks:
+            chunks = [y]
 
-        # MERT returns last_hidden_state (batch, time_steps, hidden_dim);
-        # mean-pool over the time axis to get a fixed-size embedding per track.
-        batch_embs = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
-        for j in range(batch_embs.shape[0]):
-            embeddings.append(batch_embs[j])
+        chunk_embs: list[np.ndarray] = []
+        for chunk in chunks:
+            inputs = processor(
+                chunk,
+                sampling_rate=target_sr,
+                return_tensors="pt",
+                padding=True,
+            )
+            inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
+            if _clap_device.type == "cuda":
+                inputs = {k: v.half() if v.is_floating_point() else v
+                          for k, v in inputs.items()}
+            with torch.no_grad():
+                out = model(**inputs)
+            # Mean-pool over the time axis → (hidden_dim,)
+            chunk_embs.append(out.last_hidden_state.mean(dim=1).squeeze().cpu().float().numpy())
+
+        # Average all chunk embeddings → single song embedding
+        embeddings.append(np.mean(chunk_embs, axis=0))
 
     return embeddings
 
@@ -456,15 +477,29 @@ class Song:
         if sr != target_sr:
             y = _resample(y, orig_sr=sr, target_sr=target_sr)
 
-        # Prepare inputs and run inference (no gradients needed)
-        inputs = processor(y, sampling_rate=target_sr, return_tensors="pt")
-        inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = model(**inputs)
+        # Split into fixed-length chunks to avoid CUDA OOM on long tracks.
+        chunk_samples = _EMBED_CHUNK_SEC * target_sr  # 720 000 @ 24 kHz
+        chunks = [
+            y[s : s + chunk_samples]
+            for s in range(0, len(y), chunk_samples)
+            if len(y[s : s + chunk_samples]) >= target_sr
+        ]
+        if not chunks:
+            chunks = [y]
 
-        # MERT returns last_hidden_state (1, time_steps, hidden_dim);
-        # mean-pool over the time axis then flatten to a 1-D vector.
-        return outputs.last_hidden_state.mean(dim=1).squeeze().cpu().numpy()
+        chunk_embs: list[np.ndarray] = []
+        for chunk in chunks:
+            inputs = processor(chunk, sampling_rate=target_sr, return_tensors="pt")
+            inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
+            if _clap_device.type == "cuda":
+                inputs = {k: v.half() if v.is_floating_point() else v
+                          for k, v in inputs.items()}
+            with torch.no_grad():
+                out = model(**inputs)
+            chunk_embs.append(out.last_hidden_state.mean(dim=1).squeeze().cpu().float().numpy())
+
+        # Average chunk embeddings → single 1-D embedding for the song.
+        return np.mean(chunk_embs, axis=0)
 
     # ------------------------------------------------------------------
     # Readable representation
