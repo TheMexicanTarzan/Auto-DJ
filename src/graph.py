@@ -386,10 +386,17 @@ class DJGraph:
         n = self.graph.vcount()
 
         # Sensible FR defaults — can be overridden via **kwargs.
+        # FR requires strictly positive weights; clamp to a small floor so
+        # near-identical songs (weight ≈ 0 due to float32 rounding) don't
+        # cause the C-level "Weights must be positive" abort.
+        if self.graph.ecount() > 0:
+            fr_weights = [max(w, 1e-6) for w in self.graph.es["weight"]]
+        else:
+            fr_weights = None
         fr_defaults = {
             "niter": 2000,
             "start_temp": 100,
-            "weights": self.graph.es["weight"] if self.graph.ecount() > 0 else None,
+            "weights": fr_weights,
         }
 
         if algorithm == "fruchterman_reingold":
