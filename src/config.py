@@ -36,4 +36,8 @@ CACHE_PATH: Path = Path(
 # Legacy JSON cache path — used for automatic migration to pickle.
 _LEGACY_JSON_CACHE: Path = _PROJECT_ROOT / "cache" / "dj_graph_cache.json"
 
+# Separate cache for the UMAP-reduced graph (32-dim cosine embeddings).
+# Stored alongside the main cache so both can coexist without conflict.
+UMAP_CACHE_PATH: Path = CACHE_PATH.parent / "dj_graph_umap_cache.pkl"
+
 

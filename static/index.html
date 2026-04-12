@@ -221,6 +221,35 @@
           <p class="output-msg" id="recalculate-msg"></p>
         </div>
 
+        <!-- Section D: UMAP Semantic Reduction -->
+        <div class="settings-section">
+          <div class="settings-section-title">UMAP Semantic Reduction</div>
+
+          <!-- Mode toggle -->
+          <div class="mode-toggle">
+            <button class="mode-btn active" id="mode-original-btn" data-mode="original">Original</button>
+            <button class="mode-btn" id="mode-umap-btn" data-mode="umap">UMAP 32-dim</button>
+          </div>
+          <p class="output-msg" id="umap-mode-msg">Active: original embeddings</p>
+
+          <!-- UMAP hyperparameters -->
+          <div class="weight-rows" style="margin-top:12px;">
+            <div class="weight-row">
+              <span class="weight-label">n_neighbors</span>
+              <input type="range" id="umap-n-neighbors" min="5" max="100" step="1" value="15">
+              <span class="weight-value" id="umap-n-neighbors-val">15</span>
+            </div>
+            <div class="weight-row">
+              <span class="weight-label">min_dist</span>
+              <input type="range" id="umap-min-dist" min="0" max="1" step="0.01" value="0.1">
+              <span class="weight-value" id="umap-min-dist-val">0.10</span>
+            </div>
+          </div>
+
+          <button id="fit-umap-btn">Fit UMAP</button>
+          <p class="output-msg" id="fit-umap-msg"></p>
+        </div>
+
       </div>
 
     </aside>

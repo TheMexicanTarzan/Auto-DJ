@@ -1432,7 +1432,99 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
 }());
 
 // =========================================================================
-// 11. Bootstrap
+// 11. UMAP reduction
+// =========================================================================
+
+(function () {
+  // --- Slider display updates ---
+  document.getElementById("umap-n-neighbors").addEventListener("input", function () {
+    document.getElementById("umap-n-neighbors-val").textContent = this.value;
+  });
+  document.getElementById("umap-min-dist").addEventListener("input", function () {
+    document.getElementById("umap-min-dist-val").textContent =
+      parseFloat(this.value).toFixed(2);
+  });
+
+  // --- Fit UMAP ---
+  document.getElementById("fit-umap-btn").addEventListener("click", async function () {
+    var btn = this;
+    var msgEl = document.getElementById("fit-umap-msg");
+    btn.disabled = true;
+    msgEl.textContent = "Fitting UMAP\u2026 (this may take a few minutes)";
+
+    try {
+      var resp = await fetch("/api/umap/fit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          n_neighbors: parseInt(document.getElementById("umap-n-neighbors").value, 10),
+          min_dist:    parseFloat(document.getElementById("umap-min-dist").value),
+        }),
+      });
+      var data = await resp.json();
+      if (data.error) {
+        msgEl.textContent = "Error: " + data.error;
+      } else {
+        msgEl.textContent = data.message + " (" + data.num_edges + " edges)";
+        document.getElementById("mode-umap-btn").disabled = false;
+        applyMode("umap");
+        loadGraph();
+      }
+    } catch (err) {
+      msgEl.textContent = "Request failed.";
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // --- Mode toggle buttons ---
+  document.querySelectorAll(".mode-btn").forEach(function (btn) {
+    btn.addEventListener("click", async function () {
+      var mode = this.dataset.mode;
+      var msgEl = document.getElementById("umap-mode-msg");
+
+      try {
+        var resp = await fetch("/api/umap/switch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: mode }),
+        });
+        var data = await resp.json();
+        if (data.error) {
+          msgEl.textContent = "Error: " + data.error;
+        } else {
+          applyMode(mode);
+          loadGraph();
+        }
+      } catch (err) {
+        msgEl.textContent = "Switch failed.";
+      }
+    });
+  });
+
+  /** Update toggle appearance and status text to reflect the active mode. */
+  function applyMode(mode) {
+    document.querySelectorAll(".mode-btn").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.mode === mode);
+    });
+    document.getElementById("umap-mode-msg").textContent =
+      mode === "umap"
+        ? "Active: UMAP 32-dim embeddings"
+        : "Active: original embeddings";
+  }
+
+  // Sync UI to whatever mode the server is in (e.g. after page reload).
+  fetch("/api/umap/status")
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      applyMode(data.mode || "original");
+      document.getElementById("mode-umap-btn").disabled = !data.umap_available;
+    })
+    .catch(function () { /* non-fatal */ });
+}());
+
+// =========================================================================
+// 12. Bootstrap
 // =========================================================================
 
 startPolling();

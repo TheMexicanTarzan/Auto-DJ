@@ -32,7 +32,7 @@ from pydantic import BaseModel
 
 from collections import defaultdict
 
-from src.config import CACHE_PATH, SETLISTS_DIRECTORY, SONGS_DIRECTORY, _LEGACY_JSON_CACHE
+from src.config import CACHE_PATH, SETLISTS_DIRECTORY, SONGS_DIRECTORY, UMAP_CACHE_PATH, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
 from src.setlist_saver import save_setlist
 from src.utils import analyse_new_songs, discover_changes, scan_directory
@@ -54,14 +54,17 @@ logger = logging.getLogger("auto-dj-web")
 # Shared mutable state protected by a lock.
 _graph_lock = threading.Lock()
 _graph_state: dict = {
-    "graph": None,          # DJGraph | None
+    "graph": None,           # DJGraph | None — currently active graph
+    "original_graph": None,  # DJGraph | None — original-embedding graph
+    "umap_graph": None,      # DJGraph | None — UMAP-reduced graph (if fitted)
+    "mode": "original",      # "original" | "umap"
     "ready": False,
-    "progress": 0,          # 0-100
+    "progress": 0,           # 0-100
     "total": 0,
     "current": 0,
     "current_file": "",
-    "error": None,          # str | None
-    "version": 0,           # bumped on every graph mutation
+    "error": None,           # str | None
+    "version": 0,            # bumped on every graph mutation
 }
 
 
@@ -132,9 +135,25 @@ def _load_graph_background() -> None:
         # (protected by _graph_lock) if any changes are found.
         with _graph_lock:
             _graph_state["graph"] = graph
+            _graph_state["original_graph"] = graph
             _graph_state["ready"] = True
             _graph_state["progress"] = 100
             _graph_state["version"] += 1
+
+        # Opportunistically load the UMAP cache if it already exists from a
+        # previous session — avoids making the user re-fit on every restart.
+        if UMAP_CACHE_PATH.exists():
+            try:
+                umap_graph = DJGraph.load_from_pickle(UMAP_CACHE_PATH)
+                with _graph_lock:
+                    _graph_state["umap_graph"] = umap_graph
+                logger.info(
+                    "UMAP cache loaded: %d node(s), %d edge(s).",
+                    umap_graph.num_nodes,
+                    umap_graph.num_edges,
+                )
+            except Exception:
+                logger.warning("Failed to load UMAP cache — will require re-fitting.")
 
         logger.info(
             "Graph ready: %d node(s), %d edge(s).",
@@ -650,14 +669,98 @@ def api_recalculate(req: RecalculateRequest):
 
     with _graph_lock:
         _graph_state["version"] += 1
+        active_mode = _graph_state.get("mode", "original")
 
-    # Persist to cache
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    graph.save_to_pickle(CACHE_PATH)
+    # Persist to the cache that matches the currently active graph.
+    cache = UMAP_CACHE_PATH if active_mode == "umap" else CACHE_PATH
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    graph.save_to_pickle(cache)
 
     return _orjson_response({
         "num_edges": graph.num_edges,
         "message": "Edges recalculated successfully.",
+    })
+
+
+# ---------------------------------------------------------------------------
+# UMAP reduction endpoints
+# ---------------------------------------------------------------------------
+
+class UmapFitRequest(BaseModel):
+    n_neighbors: int = 15
+    min_dist: float = 0.1
+
+
+@app.post("/api/umap/fit")
+def api_umap_fit(req: UmapFitRequest):
+    """Fit UMAP on the original graph's embeddings and cache the result."""
+    with _graph_lock:
+        ready = _graph_state["ready"]
+        source_graph = _graph_state.get("original_graph")
+
+    if not ready or source_graph is None:
+        return _orjson_response({"error": "Graph not ready"}, status_code=503)
+
+    try:
+        from src.reduction import build_umap_graph
+        umap_graph = build_umap_graph(
+            source_graph,
+            n_neighbors=req.n_neighbors,
+            min_dist=req.min_dist,
+        )
+    except ImportError as exc:
+        return _orjson_response({"error": str(exc)}, status_code=500)
+    except Exception as exc:
+        logger.exception("UMAP fit failed.")
+        return _orjson_response({"error": str(exc)}, status_code=500)
+
+    UMAP_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    umap_graph.save_to_pickle(UMAP_CACHE_PATH)
+
+    with _graph_lock:
+        _graph_state["umap_graph"] = umap_graph
+
+    return _orjson_response({
+        "num_edges": umap_graph.num_edges,
+        "message": "UMAP graph built successfully.",
+    })
+
+
+class SwitchModeRequest(BaseModel):
+    mode: str
+
+
+@app.post("/api/umap/switch")
+def api_umap_switch(req: SwitchModeRequest):
+    """Switch the active graph between original and UMAP-reduced embeddings."""
+    if req.mode not in ("original", "umap"):
+        return _orjson_response({"error": "mode must be 'original' or 'umap'"}, status_code=400)
+
+    with _graph_lock:
+        if req.mode == "umap":
+            if _graph_state["umap_graph"] is None:
+                return _orjson_response(
+                    {"error": "UMAP graph not available. Fit it first."}, status_code=400
+                )
+            _graph_state["graph"] = _graph_state["umap_graph"]
+        else:
+            _graph_state["graph"] = _graph_state["original_graph"]
+        _graph_state["mode"] = req.mode
+        _graph_state["version"] += 1
+
+    return _orjson_response({"mode": req.mode, "message": f"Switched to {req.mode} graph."})
+
+
+@app.get("/api/umap/status")
+def api_umap_status():
+    """Return the current embedding mode and whether a UMAP graph is available."""
+    with _graph_lock:
+        mode = _graph_state.get("mode", "original")
+        umap_available = _graph_state["umap_graph"] is not None
+
+    return _orjson_response({
+        "mode": mode,
+        "umap_available": umap_available,
     })
 
 

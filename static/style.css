@@ -539,6 +539,68 @@ aside label {
   margin-bottom: 0;
 }
 
+/* ---- UMAP mode toggle ---- */
+
+.mode-toggle {
+  display: flex;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #39FF14;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 8px 4px;
+  background: transparent;
+  color: #39FF14;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.mode-btn + .mode-btn {
+  border-left: 1px solid #39FF14;
+}
+
+.mode-btn.active {
+  background: #39FF14;
+  color: #000000;
+}
+
+.mode-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#fit-umap-btn {
+  width: 100%;
+  padding: 10px;
+  background-color: #1a1a1a;
+  color: #39FF14;
+  border: 1px solid #39FF14;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: bold;
+  transition: background-color 0.15s;
+}
+
+#fit-umap-btn:hover {
+  background-color: #2a2a2a;
+}
+
+#fit-umap-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#fit-umap-msg {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+
 /* ---- Node details structured display ---- */
 
 #node-details {
