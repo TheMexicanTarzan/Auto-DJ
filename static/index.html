@@ -187,6 +187,40 @@
           </div>
         </div>
 
+        <!-- Section C: Weight Settings -->
+        <div class="settings-section">
+          <div class="settings-section-title">Weight Settings</div>
+          <div class="weight-rows">
+            <div class="weight-row">
+              <span class="weight-label">Harmonic</span>
+              <input type="range" id="weight-harmonic" min="0" max="1" step="0.01" value="0.35">
+              <span class="weight-value" id="weight-harmonic-val">0.35</span>
+            </div>
+            <div class="weight-row">
+              <span class="weight-label">Tempo</span>
+              <input type="range" id="weight-tempo" min="0" max="1" step="0.01" value="0.25">
+              <span class="weight-value" id="weight-tempo-val">0.25</span>
+            </div>
+            <div class="weight-row">
+              <span class="weight-label">Semantic</span>
+              <input type="range" id="weight-semantic" min="0" max="1" step="0.01" value="0.40">
+              <span class="weight-value" id="weight-semantic-val">0.40</span>
+            </div>
+            <div class="weight-row">
+              <span class="weight-label">Double penalty</span>
+              <input type="range" id="weight-double-penalty" min="0" max="1" step="0.05" value="0">
+              <span class="weight-value" id="weight-double-penalty-val">0.00</span>
+            </div>
+            <div class="weight-row">
+              <span class="weight-label">Triplet penalty</span>
+              <input type="range" id="weight-triplet-penalty" min="0" max="1" step="0.05" value="0">
+              <span class="weight-value" id="weight-triplet-penalty-val">0.00</span>
+            </div>
+          </div>
+          <button id="recalculate-btn">Recalculate Edges</button>
+          <p class="output-msg" id="recalculate-msg"></p>
+        </div>
+
       </div>
 
     </aside>

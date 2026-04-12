@@ -479,6 +479,66 @@ aside label {
   margin-right: 4px;
 }
 
+/* ---- Weight settings ---- */
+
+.weight-rows {
+  margin-bottom: 12px;
+}
+
+.weight-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.weight-label {
+  flex: 0 0 100px;
+  font-size: 13px;
+  color: #FFFFFF;
+}
+
+.weight-row input[type="range"] {
+  flex: 1;
+  accent-color: #39FF14;
+  cursor: pointer;
+}
+
+.weight-value {
+  flex: 0 0 32px;
+  font-size: 13px;
+  color: #9CA3AF;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#recalculate-btn {
+  width: 100%;
+  padding: 10px;
+  background-color: #39FF14;
+  color: #000000;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: bold;
+  transition: background-color 0.15s;
+}
+
+#recalculate-btn:hover {
+  background-color: #32D612;
+}
+
+#recalculate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#recalculate-msg {
+  margin-top: 8px;
+  margin-bottom: 0;
+}
+
 /* ---- Node details structured display ---- */
 
 #node-details {

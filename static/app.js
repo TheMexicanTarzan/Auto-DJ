@@ -1377,7 +1377,62 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
 });
 
 // =========================================================================
-// 9. Bootstrap
+// 10. Weight settings
+// =========================================================================
+
+(function () {
+  var sliders = [
+    { id: "weight-harmonic",       valId: "weight-harmonic-val" },
+    { id: "weight-tempo",          valId: "weight-tempo-val" },
+    { id: "weight-semantic",       valId: "weight-semantic-val" },
+    { id: "weight-double-penalty", valId: "weight-double-penalty-val" },
+    { id: "weight-triplet-penalty",valId: "weight-triplet-penalty-val" },
+  ];
+
+  sliders.forEach(function (s) {
+    document.getElementById(s.id).addEventListener("input", function () {
+      document.getElementById(s.valId).textContent =
+        parseFloat(this.value).toFixed(2);
+    });
+  });
+
+  document.getElementById("recalculate-btn").addEventListener("click", async function () {
+    var btn = this;
+    var msgEl = document.getElementById("recalculate-msg");
+
+    btn.disabled = true;
+    msgEl.textContent = "Recalculating\u2026";
+
+    try {
+      var resp = await fetch("/api/recalculate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          harmonic:        parseFloat(document.getElementById("weight-harmonic").value),
+          tempo:           parseFloat(document.getElementById("weight-tempo").value),
+          semantic:        parseFloat(document.getElementById("weight-semantic").value),
+          double_penalty:  parseFloat(document.getElementById("weight-double-penalty").value),
+          triplet_penalty: parseFloat(document.getElementById("weight-triplet-penalty").value),
+        }),
+      });
+      var data = await resp.json();
+
+      if (data.error) {
+        msgEl.textContent = "Error: " + data.error;
+      } else {
+        msgEl.textContent = data.message + " (" + data.num_edges + " edges)";
+        loadGraph();
+      }
+    } catch (err) {
+      msgEl.textContent = "Request failed.";
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}());
+
+// =========================================================================
+// 11. Bootstrap
 // =========================================================================
 
 startPolling();
