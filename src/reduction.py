@@ -34,16 +34,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Fixed output dimensionality — not exposed as a hyperparameter because
-# changing it invalidates any saved UMAP cache.
-_N_COMPONENTS: int = 32
-
-
 def build_umap_graph(
     source_graph: "DJGraph",  # noqa: F821 — forward ref; graph imported lazily
     *,
     n_neighbors: int = 15,
     min_dist: float = 0.1,
+    n_components: int = 32,
     weights: dict[str, float] | None = None,
     type_penalties: dict[str, float] | None = None,
 ) -> "DJGraph":
@@ -63,14 +59,18 @@ def build_umap_graph(
         min_dist:       Minimum distance between points in the low-dim output
                         space (0.0–1.0).  Smaller values pack similar songs
                         more tightly; larger values spread them more evenly.
+        n_components:   Output dimensionality (default 32).  Higher values
+                        preserve more information; lower values compress
+                        further and reduce concentration-of-measure effects.
         weights:        Metric blend coefficients forwarded to DJGraph.build
                         (harmonic / tempo / semantic).  None = defaults.
         type_penalties: Additive type penalties forwarded to DJGraph.build
                         (double / triplet).  None = defaults.
 
     Returns:
-        A new DJGraph whose Song objects carry 32-dim UMAP embeddings and
-        whose edges are computed from cosine similarity in that space.
+        A new DJGraph whose Song objects carry n_components-dim UMAP
+        embeddings and whose edges are computed from cosine similarity
+        in that space.
 
     Raises:
         ImportError:  If umap-learn is not installed.
@@ -96,13 +96,13 @@ def build_umap_graph(
     logger.info(
         "Fitting UMAP: %d songs × %d-dim → %d-dim  "
         "(n_neighbors=%d, min_dist=%.2f) …",
-        n_songs, n_dims, _N_COMPONENTS, n_neighbors, min_dist,
+        n_songs, n_dims, n_components, n_neighbors, min_dist,
     )
 
     reducer = UMAP(
         n_neighbors=n_neighbors,
         min_dist=min_dist,
-        n_components=_N_COMPONENTS,
+        n_components=n_components,
         metric="cosine",
         random_state=42,
         low_memory=True,

@@ -512,6 +512,33 @@ aside label {
   font-variant-numeric: tabular-nums;
 }
 
+.weight-value-input {
+  flex: 0 0 52px;
+  width: 52px;
+  background: transparent;
+  border: 1px solid #2D2D2D;
+  border-radius: 3px;
+  color: #9CA3AF;
+  font-size: 13px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 4px;
+  -moz-appearance: textfield;
+}
+
+.weight-value-input:focus {
+  outline: none;
+  border-color: #39FF14;
+  color: #FFFFFF;
+}
+
+/* Hide browser spin buttons */
+.weight-value-input::-webkit-outer-spin-button,
+.weight-value-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 #recalculate-btn {
   width: 100%;
   padding: 10px;

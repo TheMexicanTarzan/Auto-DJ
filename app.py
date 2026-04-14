@@ -704,6 +704,7 @@ def api_recalculate(req: RecalculateRequest):
 class UmapFitRequest(BaseModel):
     n_neighbors: int = 15
     min_dist: float = 0.1
+    n_components: int = 32
 
 
 @app.post("/api/umap/fit")
@@ -722,6 +723,7 @@ def api_umap_fit(req: UmapFitRequest):
             source_graph,
             n_neighbors=req.n_neighbors,
             min_dist=req.min_dist,
+            n_components=req.n_components,
         )
     except ImportError as exc:
         return _orjson_response({"error": str(exc)}, status_code=500)

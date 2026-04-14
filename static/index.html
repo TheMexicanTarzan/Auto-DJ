@@ -194,27 +194,27 @@
             <div class="weight-row">
               <span class="weight-label">Harmonic</span>
               <input type="range" id="weight-harmonic" min="0" max="1" step="0.01" value="0.35">
-              <span class="weight-value" id="weight-harmonic-val">0.35</span>
+              <input type="number" class="weight-value-input" id="weight-harmonic-val" min="0" max="1" step="0.01" value="0.35">
             </div>
             <div class="weight-row">
               <span class="weight-label">Tempo</span>
               <input type="range" id="weight-tempo" min="0" max="1" step="0.01" value="0.25">
-              <span class="weight-value" id="weight-tempo-val">0.25</span>
+              <input type="number" class="weight-value-input" id="weight-tempo-val" min="0" max="1" step="0.01" value="0.25">
             </div>
             <div class="weight-row">
               <span class="weight-label">Semantic</span>
               <input type="range" id="weight-semantic" min="0" max="1" step="0.01" value="0.40">
-              <span class="weight-value" id="weight-semantic-val">0.40</span>
+              <input type="number" class="weight-value-input" id="weight-semantic-val" min="0" max="1" step="0.01" value="0.40">
             </div>
             <div class="weight-row">
               <span class="weight-label">Double penalty</span>
               <input type="range" id="weight-double-penalty" min="0" max="1" step="0.05" value="0">
-              <span class="weight-value" id="weight-double-penalty-val">0.00</span>
+              <input type="number" class="weight-value-input" id="weight-double-penalty-val" min="0" max="1" step="0.05" value="0.00">
             </div>
             <div class="weight-row">
               <span class="weight-label">Triplet penalty</span>
               <input type="range" id="weight-triplet-penalty" min="0" max="1" step="0.05" value="0">
-              <span class="weight-value" id="weight-triplet-penalty-val">0.00</span>
+              <input type="number" class="weight-value-input" id="weight-triplet-penalty-val" min="0" max="1" step="0.05" value="0.00">
             </div>
           </div>
           <button id="recalculate-btn">Recalculate Edges</button>
@@ -228,7 +228,7 @@
           <!-- Mode toggle -->
           <div class="mode-toggle">
             <button class="mode-btn active" id="mode-original-btn" data-mode="original">Original</button>
-            <button class="mode-btn" id="mode-umap-btn" data-mode="umap">UMAP 32-dim</button>
+            <button class="mode-btn" id="mode-umap-btn" data-mode="umap">UMAP</button>
           </div>
           <p class="output-msg" id="umap-mode-msg">Active: original embeddings</p>
 
@@ -237,12 +237,17 @@
             <div class="weight-row">
               <span class="weight-label">n_neighbors</span>
               <input type="range" id="umap-n-neighbors" min="5" max="100" step="1" value="15">
-              <span class="weight-value" id="umap-n-neighbors-val">15</span>
+              <input type="number" class="weight-value-input" id="umap-n-neighbors-val" min="5" max="100" step="1" value="15">
             </div>
             <div class="weight-row">
               <span class="weight-label">min_dist</span>
               <input type="range" id="umap-min-dist" min="0" max="1" step="0.01" value="0.1">
-              <span class="weight-value" id="umap-min-dist-val">0.10</span>
+              <input type="number" class="weight-value-input" id="umap-min-dist-val" min="0" max="1" step="0.01" value="0.10">
+            </div>
+            <div class="weight-row">
+              <span class="weight-label">n_components</span>
+              <input type="range" id="umap-n-components" min="2" max="256" step="1" value="32">
+              <input type="number" class="weight-value-input" id="umap-n-components-val" min="2" max="256" step="1" value="32">
             </div>
           </div>
 

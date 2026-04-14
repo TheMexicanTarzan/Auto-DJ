@@ -108,6 +108,48 @@ function getAllowedTypes() {
 }
 
 /**
+ * Wire a range slider and a number input so they stay in sync.
+ *
+ * While typing: the slider tracks valid in-range values immediately.
+ * On blur / Enter: the value is clamped to [min, max] and formatted.
+ *
+ * @param {string} sliderId  - ID of the <input type="range">
+ * @param {string} numberId  - ID of the <input type="number">
+ * @param {number} decimals  - Decimal places used when formatting the value
+ */
+function linkSliderAndInput(sliderId, numberId, decimals) {
+  var slider = document.getElementById(sliderId);
+  var num    = document.getElementById(numberId);
+  var min    = parseFloat(slider.min);
+  var max    = parseFloat(slider.max);
+
+  // Slider → number
+  slider.addEventListener("input", function () {
+    num.value = parseFloat(this.value).toFixed(decimals);
+  });
+
+  // Number → slider (live, only while value is within range)
+  num.addEventListener("input", function () {
+    var val = parseFloat(this.value);
+    if (!isNaN(val) && val >= min && val <= max) {
+      slider.value = val;
+    }
+  });
+
+  // On commit (blur or Enter): clamp and reformat
+  num.addEventListener("change", function () {
+    var val = parseFloat(this.value);
+    if (isNaN(val)) {
+      val = parseFloat(slider.value);
+    } else {
+      val = Math.max(min, Math.min(max, val));
+      slider.value = val;
+    }
+    this.value = val.toFixed(decimals);
+  });
+}
+
+/**
  * Return the list of excluded directory paths given the current filter state,
  * or null when no filter is active (all directories visible).
  */
@@ -1389,20 +1431,11 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
 // =========================================================================
 
 (function () {
-  var sliders = [
-    { id: "weight-harmonic",       valId: "weight-harmonic-val" },
-    { id: "weight-tempo",          valId: "weight-tempo-val" },
-    { id: "weight-semantic",       valId: "weight-semantic-val" },
-    { id: "weight-double-penalty", valId: "weight-double-penalty-val" },
-    { id: "weight-triplet-penalty",valId: "weight-triplet-penalty-val" },
-  ];
-
-  sliders.forEach(function (s) {
-    document.getElementById(s.id).addEventListener("input", function () {
-      document.getElementById(s.valId).textContent =
-        parseFloat(this.value).toFixed(2);
-    });
-  });
+  linkSliderAndInput("weight-harmonic",        "weight-harmonic-val",        2);
+  linkSliderAndInput("weight-tempo",           "weight-tempo-val",           2);
+  linkSliderAndInput("weight-semantic",        "weight-semantic-val",        2);
+  linkSliderAndInput("weight-double-penalty",  "weight-double-penalty-val",  2);
+  linkSliderAndInput("weight-triplet-penalty", "weight-triplet-penalty-val", 2);
 
   document.getElementById("recalculate-btn").addEventListener("click", async function () {
     var btn = this;
@@ -1444,14 +1477,10 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
 // =========================================================================
 
 (function () {
-  // --- Slider display updates ---
-  document.getElementById("umap-n-neighbors").addEventListener("input", function () {
-    document.getElementById("umap-n-neighbors-val").textContent = this.value;
-  });
-  document.getElementById("umap-min-dist").addEventListener("input", function () {
-    document.getElementById("umap-min-dist-val").textContent =
-      parseFloat(this.value).toFixed(2);
-  });
+  // --- Slider ↔ number input sync ---
+  linkSliderAndInput("umap-n-neighbors",  "umap-n-neighbors-val",  0);
+  linkSliderAndInput("umap-min-dist",     "umap-min-dist-val",     2);
+  linkSliderAndInput("umap-n-components", "umap-n-components-val", 0);
 
   // --- Fit UMAP ---
   document.getElementById("fit-umap-btn").addEventListener("click", async function () {
@@ -1465,8 +1494,9 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          n_neighbors: parseInt(document.getElementById("umap-n-neighbors").value, 10),
-          min_dist:    parseFloat(document.getElementById("umap-min-dist").value),
+          n_neighbors:  parseInt(document.getElementById("umap-n-neighbors").value,  10),
+          min_dist:     parseFloat(document.getElementById("umap-min-dist").value),
+          n_components: parseInt(document.getElementById("umap-n-components").value, 10),
         }),
       });
       var data = await resp.json();
