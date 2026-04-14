@@ -851,6 +851,8 @@ class DJGraph:
         song_id: str,
         *,
         allowed_types: set[str] | None = None,
+        excluded_dirs: set[str] | None = None,
+        songs_directory: str | None = None,
     ) -> list[tuple[Song, float, str]]:
         """
         Return all songs reachable in one hop from the given song,
@@ -871,6 +873,25 @@ class DJGraph:
             other_idx = edge.target if edge.source == v.index else edge.source
             other_v = self.graph.vs[other_idx]
             result.append((self._songs[other_v["name"]], edge["weight"], etype))
+
+        if excluded_dirs and songs_directory:
+            from pathlib import Path as _Path
+            base = _Path(songs_directory).resolve()
+            filtered: list[tuple[Song, float, str]] = []
+            for nbr_song, cost, etype in result:
+                try:
+                    rel_parent = str(
+                        _Path(nbr_song.file_path).resolve().relative_to(base).parent
+                    )
+                except ValueError:
+                    rel_parent = "."
+                if not any(
+                    rel_parent == exd or rel_parent.startswith(exd + "/")
+                    for exd in excluded_dirs
+                ):
+                    filtered.append((nbr_song, cost, etype))
+            result = filtered
+
         return sorted(result, key=lambda x: x[1])
 
     def generate_setlist(
@@ -882,6 +903,8 @@ class DJGraph:
         starting_key: str | None = None,
         set_key: str | None = None,
         allowed_types: set[str] | None = None,
+        excluded_dirs: set[str] | None = None,
+        songs_directory: str | None = None,
         max_attempts: int = 60,
     ) -> list[Song]:
         """
@@ -918,11 +941,30 @@ class DJGraph:
         def song_duration(s: Song) -> float:
             return s.duration_sec if s.duration_sec > 0 else _FALLBACK_DURATION
 
+        # Pre-build set of file_paths that are excluded by the directory filter.
+        excluded_paths: set[str] = set()
+        if excluded_dirs and songs_directory:
+            from pathlib import Path as _Path
+            base = _Path(songs_directory).resolve()
+            for s in self._songs.values():
+                try:
+                    rel_parent = str(
+                        _Path(s.file_path).resolve().relative_to(base).parent
+                    )
+                except ValueError:
+                    rel_parent = "."
+                if any(
+                    rel_parent == exd or rel_parent.startswith(exd + "/")
+                    for exd in excluded_dirs
+                ):
+                    excluded_paths.add(s.file_path)
+
         # Pre-build the allowed candidate set (BPM range + optional set_key).
         allowed_pool: set[str] = {
             s.file_path
             for s in self._songs.values()
-            if min_bpm <= s.bpm <= max_bpm
+            if s.file_path not in excluded_paths
+            and min_bpm <= s.bpm <= max_bpm
             and (set_key is None or s.key == set_key)
         }
 
@@ -963,7 +1005,10 @@ class DJGraph:
                 candidates: list[Song] = [
                     nbr
                     for nbr, _cost, _etype in self.neighbours(
-                        current.file_path, allowed_types=allowed_types
+                        current.file_path,
+                        allowed_types=allowed_types,
+                        excluded_dirs=excluded_dirs,
+                        songs_directory=songs_directory,
                     )
                     if nbr.file_path not in visited
                     and nbr.file_path in allowed_pool

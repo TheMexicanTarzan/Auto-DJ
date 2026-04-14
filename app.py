@@ -518,6 +518,7 @@ class SetlistRequest(BaseModel):
     starting_key: str | None = None     # key of the first track (optional)
     set_key: str | None = None          # key constraint for all tracks (optional)
     allowed_types: list[str] | None = None
+    excluded_dirs: list[str] | None = None
 
 
 @app.post("/api/setlist")
@@ -534,6 +535,7 @@ def api_setlist(req: SetlistRequest):
 
     target_sec = req.target_duration_min * 60.0
     allowed = set(req.allowed_types) if req.allowed_types else None
+    excluded = set(req.excluded_dirs) if req.excluded_dirs else None
 
     try:
         songs = graph.generate_setlist(
@@ -543,6 +545,8 @@ def api_setlist(req: SetlistRequest):
             starting_key=req.starting_key or None,
             set_key=req.set_key or None,
             allowed_types=allowed,
+            excluded_dirs=excluded,
+            songs_directory=SONGS_DIRECTORY,
         )
     except ValueError as exc:
         return _orjson_response({"error": str(exc)}, status_code=400)
@@ -579,7 +583,12 @@ def api_setlist(req: SetlistRequest):
 
 
 @app.get("/api/neighbors/{node_id:path}")
-def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K, types: str | None = None):
+def api_neighbors(
+    node_id: str,
+    k: int = _DEFAULT_TOP_K,
+    types: str | None = None,
+    dirs: str | None = None,
+):
     """Return a node's metadata and its top-K nearest neighbours."""
     graph = _get_graph()
     if graph is None:
@@ -591,7 +600,13 @@ def api_neighbors(node_id: str, k: int = _DEFAULT_TOP_K, types: str | None = Non
         return _orjson_response({"error": f"Unknown node: {node_id}"}, status_code=404)
 
     allowed_types = set(types.split(",")) if types else None
-    neighbours = graph.neighbours(node_id, allowed_types=allowed_types)
+    excluded_dirs = set(dirs.split(",")) if dirs else None
+    neighbours = graph.neighbours(
+        node_id,
+        allowed_types=allowed_types,
+        excluded_dirs=excluded_dirs,
+        songs_directory=SONGS_DIRECTORY,
+    )
     top_k = neighbours[:max(1, min(k, 50))]
 
     return _orjson_response({

@@ -107,6 +107,17 @@ function getAllowedTypes() {
   return types;
 }
 
+/**
+ * Return the list of excluded directory paths given the current filter state,
+ * or null when no filter is active (all directories visible).
+ */
+function getExcludedDirs() {
+  if (activeDirectories === null || !directoryTree) return null;
+  var allDirs = collectAllDirs(directoryTree, []);
+  var excluded = allDirs.filter(function (d) { return !isDirectoryActive(d); });
+  return excluded.length > 0 ? excluded : null;
+}
+
 /** Escape a string for safe insertion into innerHTML. */
 function escapeHtml(str) {
   return String(str)
@@ -519,10 +530,12 @@ async function loadNodeDetails(nodeId) {
   var k = parseInt(document.getElementById("top-k-input").value, 10) || 10;
   var types = getAllowedTypes();
   var typesParam = types.length < 3 ? "&types=" + types.join(",") : "";
+  var excluded = getExcludedDirs();
+  var dirsParam = excluded ? "&dirs=" + excluded.map(encodeURIComponent).join(",") : "";
 
   try {
     var resp = await fetch(
-      "/api/neighbors/" + encodeURIComponent(nodeId) + "?k=" + k + typesParam
+      "/api/neighbors/" + encodeURIComponent(nodeId) + "?k=" + k + typesParam + dirsParam
     );
     var data = await resp.json();
 
@@ -992,15 +1005,7 @@ document.getElementById("find-path-btn").addEventListener("click", async functio
 
   try {
     var allowedTypes = getAllowedTypes();
-    // Build excluded directories list (send the smaller set)
-    var excludedDirs = null;
-    if (activeDirectories !== null && directoryTree) {
-      var allDirs = collectAllDirs(directoryTree, []);
-      excludedDirs = allDirs.filter(function (d) {
-        return !isDirectoryActive(d);
-      });
-      if (excludedDirs.length === 0) excludedDirs = null;
-    }
+    var excludedDirs = getExcludedDirs();
     var resp = await fetch("/api/path", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1123,6 +1128,7 @@ document.getElementById("generate-setlist-btn").addEventListener("click", async 
         starting_key: startingKey,
         set_key: setKey,
         allowed_types: getAllowedTypes(),
+        excluded_dirs: getExcludedDirs(),
       }),
     });
     var result = await resp.json();
@@ -1298,7 +1304,9 @@ function buildSetlistFlow(pathNodes) {
 /** Fetch neighbors and populate the picker panel. */
 async function populateSetlistPicker(pickerEl, nodeId, index) {
   try {
-    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId) + "?k=8");
+    var excluded = getExcludedDirs();
+    var dirsParam = excluded ? "&dirs=" + excluded.map(encodeURIComponent).join(",") : "";
+    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId) + "?k=8" + dirsParam);
     var data = await resp.json();
 
     if (data.error || !data.neighbors || data.neighbors.length === 0) {
