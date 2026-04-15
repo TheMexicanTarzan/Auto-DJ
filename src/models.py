@@ -34,7 +34,8 @@ class AudioAnalysis(NamedTuple):
     beat_times: list     # all detected beat times (seconds)
     downbeat_times: list # downbeat ("1") times (seconds)
     fingerprint: str     # Chromaprint audio fingerprint
-    duration_sec: float  # total audio duration in seconds
+    duration_sec: float = 0.0   # total audio duration in seconds
+    intro_is_rhythmic: bool = True  # False → genuinely beatless intro (drop)
 
 # ---------------------------------------------------------------------------
 # CLAP model singleton — loaded once, shared across all Song instances.
@@ -48,15 +49,38 @@ class AudioAnalysis(NamedTuple):
 _clap_model = None
 _clap_processor = None
 _clap_device = None
+_clap_embed_dtype = None  # set after model load; drives input casting
 
-# Length of each audio segment fed to MERT in one forward pass.
-# 30 s @ 24 kHz = 720 000 samples → keeps peak VRAM well below 2 GB.
+# Legacy fixed-stride chunk length (seconds).  Kept for Song._compute_embedding
+# fallback and _probe_batch_size worst-case sizing.
 _EMBED_CHUNK_SEC = 30
 
-# Number of same-length chunks batched into one MERT forward pass.
-# With SDPA's O(N) attention memory, 4 × 30 s chunks fits comfortably
-# in 2 GB VRAM.  Increase if your GPU has more headroom.
+# Conservative default batch size for CPU / MPS or when probing is skipped.
 _EMBED_BATCH_SIZE = 4
+
+# Probed CUDA batch size (cached per session; None = not yet determined).
+_PROBED_BATCH_SIZE: int | None = None
+
+
+def _select_embed_dtype(device: "torch.device") -> "torch.dtype":
+    """Select the best floating-point dtype for MERT inference.
+
+    - bfloat16 → CUDA Ampere+ (sm ≥ 8.0) or Apple MPS
+    - float16  → CUDA Volta / Turing (sm 7.0–7.9)
+    - float32  → older CUDA, CPU, or unknown device
+    """
+    import torch
+
+    if device.type == "cuda":
+        major, _ = torch.cuda.get_device_capability(device)
+        if major >= 8:
+            return torch.bfloat16
+        if major >= 7:
+            return torch.float16
+        return torch.float32
+    if device.type == "mps":
+        return torch.bfloat16
+    return torch.float32
 
 
 def _get_clap_model():
@@ -67,7 +91,7 @@ def _get_clap_model():
     SDPA (PyTorch native Flash Attention) and torch.compile are enabled
     where supported, with graceful fallbacks for older hardware/software.
     """
-    global _clap_model, _clap_processor, _clap_device
+    global _clap_model, _clap_processor, _clap_device, _clap_embed_dtype
 
     if _clap_model is None:
         import torch
@@ -95,8 +119,12 @@ def _get_clap_model():
 
         _clap_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         _clap_model.to(_clap_device)
-        if _clap_device.type == "cuda":
-            _clap_model.half()  # float16 halves weight memory (~380 MB → ~190 MB)
+
+        # Select the best precision for this device and cast model weights.
+        _clap_embed_dtype = _select_embed_dtype(_clap_device)
+        if _clap_embed_dtype != torch.float32:
+            _clap_model.to(_clap_embed_dtype)
+            logger.info("MERT weights cast to %s.", _clap_embed_dtype)
 
         # torch.compile — JIT-compiles MERT for faster inference.
         # dynamic=True handles varying batch/chunk sizes without recompilation.
@@ -120,6 +148,66 @@ def _get_clap_model():
         logger.info("MERT model ready on device: %s", _clap_device)
 
     return _clap_model, _clap_processor
+
+
+# ---------------------------------------------------------------------------
+# Batch-size probing  (run once per session on CUDA; cached result)
+# ---------------------------------------------------------------------------
+
+def _probe_batch_size() -> int:
+    """Probe the largest safe MERT batch size via exponential search.
+
+    Doubles the batch size until a CUDA OOM error occurs, then backs off to
+    75 % of the last OOM-free size.  Result is cached for the session.
+
+    Returns the conservative default (_EMBED_BATCH_SIZE) on CPU and MPS
+    where memory is not the limiting factor or is not easily probed.
+    """
+    global _PROBED_BATCH_SIZE
+    if _PROBED_BATCH_SIZE is not None:
+        return _PROBED_BATCH_SIZE
+
+    import torch
+
+    if _clap_device is None or _clap_device.type != "cuda":
+        _PROBED_BATCH_SIZE = _EMBED_BATCH_SIZE
+        return _PROBED_BATCH_SIZE
+
+    model, processor = _get_clap_model()
+    target_sr = 24_000
+    chunk_samples = _EMBED_CHUNK_SEC * target_sr  # worst-case chunk length
+
+    batch_size = 1
+    last_good = 1
+    while batch_size <= 64:
+        try:
+            dummy = [np.zeros(chunk_samples, dtype=np.float32)] * batch_size
+            inputs = processor(
+                dummy, sampling_rate=target_sr, return_tensors="pt", padding=True,
+            )
+            inputs = {
+                k: (v.to(_clap_device).to(_clap_embed_dtype)
+                    if v.is_floating_point() and _clap_embed_dtype is not None
+                    else v.to(_clap_device))
+                for k, v in inputs.items()
+            }
+            with torch.no_grad():
+                model(**inputs)
+            torch.cuda.synchronize()
+            last_good = batch_size
+            batch_size *= 2
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower():
+                torch.cuda.empty_cache()
+                break
+            raise
+
+    _PROBED_BATCH_SIZE = max(1, int(last_good * 0.75))
+    logger.info(
+        "MERT batch size probed: %d (last OOM-free: %d)",
+        _PROBED_BATCH_SIZE, last_good,
+    )
+    return _PROBED_BATCH_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +328,188 @@ def _detect_beats_and_downbeats(
 
 
 # ---------------------------------------------------------------------------
+# Intro classification  (rhythmic vs genuinely beatless)
+# ---------------------------------------------------------------------------
+
+def _detect_intro_type(
+    y: np.ndarray,
+    sr: int,
+    beat_times: list[float],
+    bpm: float,
+) -> bool:
+    """Return True if a long pre-beat intro appears rhythmic (Essentia false
+    negative), or False if it is genuinely beatless.
+
+    Only meaningful when ``beat_times[0] > 5 s``.  For songs with short or
+    absent intros, or when BPM is 0, returns True (keep) unconditionally.
+
+    Algorithm:
+        1. Extrapolate expected beat positions backward from ``beat_times[0]``
+           using the global BPM, up to 30 s before the first detected beat.
+        2. Compute per-expected-beat on-beat RMS (±25 ms window) and
+           off-beat RMS (midpoint to the next expected beat).
+        3. If the mean on-beat / off-beat RMS ratio exceeds 2.0, the intro
+           has a detectable rhythmic accent pattern → Essentia false negative.
+    """
+    if not beat_times or beat_times[0] <= 5.0 or bpm <= 0.0:
+        return True
+
+    beat_interval = 60.0 / bpm
+    analysis_start = max(0.0, beat_times[0] - 30.0)
+    window = max(1, int(0.025 * sr))  # ±25 ms in samples
+
+    # Extrapolate expected beat positions backward from the first real beat.
+    expected: list[float] = []
+    t = beat_times[0] - beat_interval
+    while t >= analysis_start:
+        expected.append(t)
+        t -= beat_interval
+
+    if not expected:
+        return True
+
+    on_rms: list[float] = []
+    off_rms: list[float] = []
+    for bt in expected:
+        mid = bt + beat_interval / 2.0  # off-beat midpoint
+
+        for center_sec, bucket in ((bt, on_rms), (mid, off_rms)):
+            center = int(center_sec * sr)
+            s = max(0, center - window)
+            e = min(len(y), center + window)
+            if e > s:
+                bucket.append(float(np.sqrt(np.mean(y[s:e] ** 2))))
+
+    if not on_rms or not off_rms:
+        return True
+
+    mean_on = float(np.mean(on_rms))
+    mean_off = float(np.mean(off_rms))
+    ratio = mean_on / mean_off if mean_off > 1e-9 else 2.0
+    return ratio > 2.0
+
+
+# ---------------------------------------------------------------------------
+# Phrase-aligned chunking
+# ---------------------------------------------------------------------------
+
+def _phrase_chunks(
+    audio: np.ndarray,
+    sr: int,
+    beat_times: list[float],
+    bpm: float,
+    intro_is_rhythmic: bool,
+) -> list[np.ndarray]:
+    """Split *audio* into phrase-aligned segments using the beat grid.
+
+    Split points are placed every 32 beats (= 8 bars in 4/4 time) so each
+    chunk roughly corresponds to a musical phrase.
+
+    Fallback:
+        When fewer than 32 beats are available, falls back to a fixed
+        _EMBED_CHUNK_SEC-second stride (same as the legacy behaviour).
+
+    Min / max clamps:
+        Chunks shorter than 12 s are merged with their neighbour.
+        Chunks longer than 30 s are split with a fixed stride.
+
+    Intro handling:
+        - ``intro_is_rhythmic=True``, intro ≥ 12 s  → own chunk.
+        - ``intro_is_rhythmic=True``, intro < 12 s   → prepended to phrase 1.
+        - ``intro_is_rhythmic=False``                → dropped entirely.
+
+    Args:
+        audio:             Mono waveform (already at MERT's target_sr).
+        sr:                Sample rate of *audio*.
+        beat_times:        Beat timestamps in seconds from Essentia analysis.
+        bpm:               Global tempo (used only for the fallback condition).
+        intro_is_rhythmic: Whether the pre-beat intro carries rhythmic content.
+
+    Returns:
+        List of non-overlapping audio chunks, each ≥ 1 s and ≤ 30 s.
+    """
+    from src.config import CHUNK_MIN_SEC, CHUNK_MAX_SEC
+
+    min_samples = CHUNK_MIN_SEC * sr
+    max_samples = CHUNK_MAX_SEC * sr
+    min_valid   = sr  # 1 s — minimum length MERT can handle
+
+    def _fixed_stride(y: np.ndarray) -> list[np.ndarray]:
+        parts = [y[s:s + max_samples] for s in range(0, len(y), max_samples)]
+        valid = [p for p in parts if len(p) >= min_valid]
+        return valid if valid else [y]
+
+    def _merge_undersized(segs: list[np.ndarray]) -> list[np.ndarray]:
+        """Merge consecutive chunks until each is at least min_samples long."""
+        if not segs:
+            return segs
+        merged: list[np.ndarray] = []
+        acc = segs[0]
+        for seg in segs[1:]:
+            if len(acc) < min_samples:
+                acc = np.concatenate([acc, seg])
+            else:
+                merged.append(acc)
+                acc = seg
+        # Final accumulated segment
+        if merged and len(acc) < min_samples:
+            merged[-1] = np.concatenate([merged[-1], acc])
+        elif len(acc) >= min_valid:
+            merged.append(acc)
+        return merged or [audio]
+
+    def _split_oversized(segs: list[np.ndarray]) -> list[np.ndarray]:
+        """Split chunks longer than max_samples with a fixed stride."""
+        result: list[np.ndarray] = []
+        for seg in segs:
+            if len(seg) > max_samples:
+                result.extend(_fixed_stride(seg))
+            elif len(seg) >= min_valid:
+                result.append(seg)
+        return result
+
+    # --- Fallback: fixed stride when not enough beats for phrase detection ---
+    if len(beat_times) < 32:
+        return _fixed_stride(audio)
+
+    # --- Phrase boundary sample indices (every 32nd beat) ---
+    phrase_times = beat_times[::32]
+    phrase_samples = [int(t * sr) for t in phrase_times] + [len(audio)]
+
+    # --- Pre-beat intro region ---
+    pre_end = phrase_samples[0]
+    pending_intro: np.ndarray | None = None
+    raw_segments: list[np.ndarray] = []
+
+    if pre_end > 0:
+        intro_seg = audio[:pre_end]
+        if intro_is_rhythmic:
+            if len(intro_seg) >= min_samples:
+                raw_segments.append(intro_seg)   # own chunk
+            else:
+                pending_intro = intro_seg         # prepend to phrase 1
+        # else: genuinely beatless → drop
+
+    # --- Phrase segments ---
+    for i in range(len(phrase_samples) - 1):
+        seg = audio[phrase_samples[i]:phrase_samples[i + 1]]
+        if len(seg) == 0:
+            continue
+        if pending_intro is not None:
+            seg = np.concatenate([pending_intro, seg])
+            pending_intro = None
+        raw_segments.append(seg)
+
+    if not raw_segments:
+        return _fixed_stride(audio)
+
+    # --- Apply min / max clamps ---
+    merged = _merge_undersized(raw_segments)
+    final  = _split_oversized(merged)
+    return final if final else _fixed_stride(audio)
+
+
+# ---------------------------------------------------------------------------
 # Audio fingerprinting  (Chromaprint via pyacoustid)
 # ---------------------------------------------------------------------------
 
@@ -307,6 +577,9 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
     # Beat / tempo detection (Essentia)
     bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(y, sr)
 
+    # Classify any long pre-beat intro as rhythmic or genuinely beatless.
+    intro_is_rhythmic = _detect_intro_type(y, sr, beat_times, bpm)
+
     # Key estimation (Essentia)
     key = _estimate_key(y, sr)
 
@@ -324,23 +597,29 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
         downbeat_times=downbeat_times,
         fingerprint=fingerprint,
         duration_sec=duration_sec,
+        intro_is_rhythmic=intro_is_rhythmic,
     )
 
 
 def compute_embeddings_batch(
-    audio_list: list[tuple[np.ndarray, int]],
+    audio_list: list[tuple[np.ndarray, int, list[float], float, bool]],
 ) -> list[np.ndarray]:
-    """
-    Compute MERT embeddings for a batch of audio signals.
+    """Compute MERT embeddings for a batch of audio signals.
 
-    Each song is split into _EMBED_CHUNK_SEC-second segments.  Full-length
-    chunks (all the same size) are processed together in mini-batches of
-    _EMBED_BATCH_SIZE for better GPU utilisation.  Shorter trailing chunks
-    are processed individually to avoid padding waste.  Per-song embeddings
-    are reassembled via a length-weighted average of their chunk embeddings.
+    Each song is split into phrase-aligned chunks (see ``_phrase_chunks``).
+    Chunks are sorted into three length buckets so that items batched
+    together have similar lengths and padding waste is minimised:
+
+    - short  (≤ 17 s)
+    - medium (17 – 24 s)
+    - long   (24 – 30 s)
+
+    Batch size is determined once per session by ``_probe_batch_size()``.
+    Per-song embeddings are reassembled via a length-weighted average.
 
     Args:
-        audio_list: List of (waveform, sample_rate) tuples.
+        audio_list: List of ``(waveform, sr, beat_times, bpm,
+                    intro_is_rhythmic)`` tuples.
 
     Returns:
         List of 1-D numpy arrays (one per input, shape = (hidden_dim,)).
@@ -352,76 +631,67 @@ def compute_embeddings_batch(
 
     model, processor = _get_clap_model()
     target_sr = 24_000  # MERT was trained at 24 kHz
+    batch_size = _probe_batch_size()
 
-    # Resample all audio to 24 kHz in parallel.  Essentia's C++ Resample
-    # releases the GIL, so threads genuinely run concurrently.
-    def _resample_one(args: tuple[np.ndarray, int]) -> np.ndarray:
-        y, sr = args
+    # Resample all audio to 24 kHz in parallel.
+    def _resample_one(args: tuple) -> np.ndarray:
+        y, sr, *_ = args
         return _resample(y, orig_sr=sr, target_sr=target_sr) if sr != target_sr else y
 
     with ThreadPoolExecutor() as pool:
         resampled = list(pool.map(_resample_one, audio_list))
 
-    chunk_samples = _EMBED_CHUNK_SEC * target_sr  # 720 000 samples per 30 s
+    # Bucket thresholds in samples (at 24 kHz)
+    _SHORT_MAX  = 17 * target_sr   # ≤ 17 s
+    _MEDIUM_MAX = 24 * target_sr   # 17 – 24 s  (> 24 s → long bucket)
 
-    # Collect all chunks with their origin.  Each entry is a
-    # (song_idx, chunk_length_samples, chunk_array) tuple assigned at
-    # split time so batching cannot scramble the song→chunk mapping.
-    # Full-length chunks (all identical size → no padding) go into
-    # full_queue for batched inference; shorter trailing chunks are
-    # processed individually to avoid padding waste.
-    full_queue: list[tuple[int, int, np.ndarray]] = []
-    short_queue: list[tuple[int, int, np.ndarray]] = []
+    # Three queues: (song_idx, chunk_len_samples, chunk_array)
+    short_q:  list[tuple[int, int, np.ndarray]] = []
+    medium_q: list[tuple[int, int, np.ndarray]] = []
+    long_q:   list[tuple[int, int, np.ndarray]] = []
 
-    for song_idx, y in enumerate(resampled):
-        chunks = [
-            y[s : s + chunk_samples]
-            for s in range(0, len(y), chunk_samples)
-            if len(y[s : s + chunk_samples]) >= target_sr
-        ]
-        if not chunks:
-            chunks = [y]  # entire track is shorter than 1 s — embed as-is
+    for song_idx, (entry, y_24k) in enumerate(zip(audio_list, resampled)):
+        _, _, beat_times, bpm, intro_is_rhythmic = entry
+        chunks = _phrase_chunks(y_24k, target_sr, beat_times, bpm, intro_is_rhythmic)
         for chunk in chunks:
-            entry = (song_idx, len(chunk), chunk)
-            (full_queue if len(chunk) == chunk_samples else short_queue).append(entry)
+            item = (song_idx, len(chunk), chunk)
+            if len(chunk) <= _SHORT_MAX:
+                short_q.append(item)
+            elif len(chunk) <= _MEDIUM_MAX:
+                medium_q.append(item)
+            else:
+                long_q.append(item)
 
     # ------------------------------------------------------------------
-    # Inner helper: one MERT forward pass for a list of same-length chunks
+    # Inner helper: one MERT forward pass for a list of chunks
     # ------------------------------------------------------------------
     def _forward(items: list[tuple[int, int, np.ndarray]]) -> np.ndarray:
-        """Run MERT on *items* and return shape (len(items), hidden_dim)."""
+        """Run MERT on *items*; return shape ``(len(items), hidden_dim)``."""
         arrays = [arr for _, _, arr in items]
         inputs = processor(
-            arrays,
-            sampling_rate=target_sr,
-            return_tensors="pt",
-            padding=True,
+            arrays, sampling_rate=target_sr, return_tensors="pt", padding=True,
         )
         inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
-        if _clap_device is not None and _clap_device.type == "cuda":
-            inputs = {k: v.half() if v.is_floating_point() else v
-                      for k, v in inputs.items()}
+        if _clap_embed_dtype is not None and _clap_embed_dtype != torch.float32:
+            inputs = {
+                k: v.to(_clap_embed_dtype) if v.is_floating_point() else v
+                for k, v in inputs.items()
+            }
         with torch.no_grad():
             out = model(**inputs)
-        # Mean-pool over the time axis → (batch, hidden_dim)
         return out.last_hidden_state.mean(dim=1).cpu().float().numpy()
 
     # ------------------------------------------------------------------
-    # Run inference and collect (song_idx, chunk_length, embedding) tuples
+    # Run inference: iterate each bucket in mini-batches
     # ------------------------------------------------------------------
     results: list[tuple[int, int, np.ndarray]] = []
 
-    # Full-length chunks in mini-batches (same length → no padding waste)
-    for i in range(0, len(full_queue), _EMBED_BATCH_SIZE):
-        batch = full_queue[i : i + _EMBED_BATCH_SIZE]
-        embs = _forward(batch)           # shape (batch_size, hidden_dim)
-        for j, (si, cl, _) in enumerate(batch):
-            results.append((si, cl, embs[j]))
-
-    # Trailing short chunks — each processed individually
-    for item in short_queue:
-        emb = _forward([item])[0]        # [0]: (1, hidden_dim) → (hidden_dim,)
-        results.append((item[0], item[1], emb))
+    for queue in (short_q, medium_q, long_q):
+        for i in range(0, len(queue), batch_size):
+            batch = queue[i : i + batch_size]
+            embs = _forward(batch)               # (batch, hidden_dim)
+            for j, (si, cl, _) in enumerate(batch):
+                results.append((si, cl, embs[j]))
 
     # ------------------------------------------------------------------
     # Reassemble per-song embeddings via length-weighted average
@@ -432,6 +702,10 @@ def compute_embeddings_batch(
 
     embeddings: list[np.ndarray] = []
     for per_song in song_chunks:
+        if not per_song:
+            # Fallback: return a zero vector of standard MERT hidden_dim
+            embeddings.append(np.zeros(768, dtype=np.float32))
+            continue
         lengths = np.array([cl for cl, _ in per_song], dtype=np.float64)
         weights = lengths / lengths.sum()
         embs = [e for _, e in per_song]
@@ -515,14 +789,17 @@ class Song:
         # --- 3. Beat / tempo detection (Essentia) -------------------------
         bpm, beat_times, downbeat_times = _detect_beats_and_downbeats(y, sr)
 
+        # --- 3a. Classify any long pre-beat intro -------------------------
+        intro_is_rhythmic = _detect_intro_type(y, sr, beat_times, bpm)
+
         # --- 4. Key estimation (Essentia) ---------------------------------
         key = _estimate_key(y, sr)
 
         # --- 5. Audio fingerprint (Chromaprint) ---------------------------
         fingerprint = _compute_fingerprint(y, sr)
 
-        # --- 6. CLAP embedding --------------------------------------------
-        embedding = cls._compute_embedding(y, sr)
+        # --- 6. CLAP embedding (phrase-aware) -----------------------------
+        embedding = cls._compute_embedding(y, sr, beat_times, bpm, intro_is_rhythmic)
 
         return cls(
             file_path=str(path),
@@ -541,47 +818,50 @@ class Song:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _compute_embedding(y: np.ndarray, sr: int) -> np.ndarray:
-        """
-        Generate a fixed-size semantic embedding for the audio signal
-        using the MERT model.
+    def _compute_embedding(
+        y: np.ndarray,
+        sr: int,
+        beat_times: list[float] | None = None,
+        bpm: float = 0.0,
+        intro_is_rhythmic: bool = True,
+    ) -> np.ndarray:
+        """Generate a fixed-size semantic embedding using MERT with
+        phrase-aware chunking.
 
-        MERT expects audio at 24 kHz, so we resample if needed.
+        MERT expects audio at 24 kHz; resamples if needed.
         Returns a 1-D numpy array (hidden_dim dimensions, typically 768).
         """
         import torch
 
         model, processor = _get_clap_model()
-
-        # MERT expects 24 kHz input
         target_sr = 24_000
         if sr != target_sr:
             y = _resample(y, orig_sr=sr, target_sr=target_sr)
 
-        # Split into fixed-length chunks to avoid CUDA OOM on long tracks.
-        chunk_samples = _EMBED_CHUNK_SEC * target_sr  # 720 000 @ 24 kHz
-        chunks = [
-            y[s : s + chunk_samples]
-            for s in range(0, len(y), chunk_samples)
-            if len(y[s : s + chunk_samples]) >= target_sr
-        ]
-        if not chunks:
-            chunks = [y]
+        chunks = _phrase_chunks(
+            y, target_sr,
+            beat_times if beat_times is not None else [],
+            bpm,
+            intro_is_rhythmic,
+        )
 
         chunk_embs: list[np.ndarray] = []
         chunk_lengths: list[int] = []
         for chunk in chunks:
             inputs = processor(chunk, sampling_rate=target_sr, return_tensors="pt")
             inputs = {k: v.to(_clap_device) for k, v in inputs.items()}
-            if _clap_device is not None and _clap_device.type == "cuda":
-                inputs = {k: v.half() if v.is_floating_point() else v
-                          for k, v in inputs.items()}
+            if _clap_embed_dtype is not None and _clap_embed_dtype != torch.float32:
+                inputs = {
+                    k: v.to(_clap_embed_dtype) if v.is_floating_point() else v
+                    for k, v in inputs.items()
+                }
             with torch.no_grad():
                 out = model(**inputs)
-            chunk_embs.append(out.last_hidden_state.mean(dim=1).squeeze().cpu().float().numpy())
+            chunk_embs.append(
+                out.last_hidden_state.mean(dim=1).squeeze().cpu().float().numpy()
+            )
             chunk_lengths.append(len(chunk))
 
-        # Weighted average — longer chunks contribute proportionally more.
         weights = np.array(chunk_lengths, dtype=np.float64)
         weights /= weights.sum()
         return np.average(chunk_embs, axis=0, weights=weights)

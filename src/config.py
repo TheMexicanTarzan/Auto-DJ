@@ -40,4 +40,19 @@ _LEGACY_JSON_CACHE: Path = _PROJECT_ROOT / "cache" / "dj_graph_cache.json"
 # Stored alongside the main cache so both can coexist without conflict.
 UMAP_CACHE_PATH: Path = CACHE_PATH.parent / "dj_graph_umap_cache.pkl"
 
+# ---------------------------------------------------------------------------
+# Audio chunking / embedding parameters
+# ---------------------------------------------------------------------------
+
+# Phrase-aligned chunking bounds (seconds).  Chunks shorter than the minimum
+# are merged with their neighbours; chunks longer than the maximum are split
+# with a fixed stride.
+CHUNK_MIN_SEC: int = 12
+CHUNK_MAX_SEC: int = 30
+
+# Estimated RAM consumed per parallel audio-analysis worker process.
+# Used by _optimal_worker_count() in utils.py to cap workers on low-RAM
+# systems (e.g. 4 GB WSL instances or shared CI machines).
+RAM_PER_WORKER_GB: float = 1.5
+
 

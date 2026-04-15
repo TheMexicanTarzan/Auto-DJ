@@ -34,13 +34,33 @@ SUPPORTED_EXTENSIONS: set[str] = {
 # the raw audio.  Keeps peak memory bounded (~5 waveforms + CLAP model).
 _CHUNK_SIZE = 5
 
-# Maximum number of parallel audio-analysis worker processes.
-# Capped at 8 to avoid excessive memory usage on constrained systems.
-_N_ANALYSIS_WORKERS: int = min(os.cpu_count() or 1, 8)
+# Estimated RAM consumed by each analysis worker process (GB).
+# Used by _optimal_worker_count() to cap workers on low-RAM systems.
+_RAM_PER_WORKER_GB: float = 1.5
 
 # Spawn context used for ProcessPoolExecutor: safe when forking from a
 # multi-threaded uvicorn process or after CUDA has been initialised.
 _MP_SPAWN_CTX = multiprocessing.get_context("spawn")
+
+
+def _optimal_worker_count() -> int:
+    """Compute a safe ProcessPoolExecutor worker count for audio analysis.
+
+    Considers physical CPU cores and available RAM so that worker processes
+    do not exhaust memory on constrained systems (e.g. 4 GB WSL instances).
+
+    Falls back to ``os.cpu_count()`` when *psutil* is unavailable.
+    """
+    try:
+        import psutil
+        physical_cores = psutil.cpu_count(logical=False) or 1
+        available_gb   = psutil.virtual_memory().available / 1024 ** 3
+        ram_cap        = max(1, int(available_gb / _RAM_PER_WORKER_GB))
+    except ImportError:
+        physical_cores = os.cpu_count() or 1
+        ram_cap        = physical_cores  # no RAM info — trust core count
+
+    return max(1, min(physical_cores, ram_cap, 8))
 
 
 def _fingerprint_match(fp_a: str, fp_b: str, threshold: float = 0.8) -> bool:
@@ -204,7 +224,7 @@ def scan_directory(
     ]
 
     with ProcessPoolExecutor(
-        max_workers=_N_ANALYSIS_WORKERS,
+        max_workers=_optimal_worker_count(),
         mp_context=_MP_SPAWN_CTX,
     ) as executor:
         if chunks:
@@ -239,7 +259,10 @@ def scan_directory(
 
                 if chunk_analyses:
                     # Embed current chunk — next chunk's workers run in parallel.
-                    audio_list = [(a.audio, a.sr) for a in chunk_analyses]
+                    audio_list = [
+                        (a.audio, a.sr, a.beat_times, a.bpm, a.intro_is_rhythmic)
+                        for a in chunk_analyses
+                    ]
                     embeddings = compute_embeddings_batch(audio_list)
 
                     # Build Song objects; raw audio released when chunk_analyses
@@ -380,7 +403,7 @@ def analyse_new_songs(
     chunks = [paths[s : s + _CHUNK_SIZE] for s in range(0, len(paths), _CHUNK_SIZE)]
 
     with ProcessPoolExecutor(
-        max_workers=_N_ANALYSIS_WORKERS,
+        max_workers=_optimal_worker_count(),
         mp_context=_MP_SPAWN_CTX,
     ) as executor:
         if chunks:
@@ -409,7 +432,10 @@ def analyse_new_songs(
                         progress_callback(processed, total, path.name)
 
                 if chunk_analyses:
-                    audio_list = [(a.audio, a.sr) for a in chunk_analyses]
+                    audio_list = [
+                        (a.audio, a.sr, a.beat_times, a.bpm, a.intro_is_rhythmic)
+                        for a in chunk_analyses
+                    ]
                     embeddings = compute_embeddings_batch(audio_list)
 
                     for analysis, embedding in zip(chunk_analyses, embeddings):

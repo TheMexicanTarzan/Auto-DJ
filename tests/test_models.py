@@ -21,11 +21,14 @@ from src.models import (
     analyse_audio,
     compute_embeddings_batch,
     _detect_beats_and_downbeats,
+    _detect_intro_type,
+    _phrase_chunks,
+    _select_embed_dtype,
     _estimate_key,
     _FLAT_TO_SHARP,
     _PITCH_CLASSES,
 )
-from src.utils import SUPPORTED_EXTENSIONS, _file_hash, scan_directory
+from src.utils import SUPPORTED_EXTENSIONS, _file_hash, _optimal_worker_count, scan_directory
 
 
 # =========================================================================
@@ -295,6 +298,8 @@ class TestAnalyseAudio:
         assert result.sr == 44100
         assert len(result.beat_times) == 2
         assert len(result.downbeat_times) == 1
+        # intro_is_rhythmic defaults True when first beat is at 0.0 s
+        assert result.intro_is_rhythmic is True
 
     def test_missing_file_raises(self):
         with pytest.raises(FileNotFoundError):
@@ -312,8 +317,8 @@ class TestComputeEmbeddingsBatch:
     def test_batch_returns_correct_count(self):
         import sys
 
-        # Each call to _forward returns shape (1, 512) — one chunk per song
-        # since the test audio (22050 samples) is shorter than one full chunk.
+        # Use batch_size=1 (via _PROBED_BATCH_SIZE patch) so each chunk is
+        # processed individually → _forward always receives a 1-item batch.
         fake_chunk_emb = np.zeros((1, 512), dtype=np.float32)
 
         mock_outputs = MagicMock()
@@ -324,15 +329,19 @@ class TestComputeEmbeddingsBatch:
         mock_model = MagicMock(return_value=mock_outputs)
         mock_processor = MagicMock(return_value={"input_values": MagicMock()})
         mock_torch = MagicMock()
+        mock_torch.float32 = object()  # sentinel — != _clap_embed_dtype (None)
 
+        # 5-tuple: (waveform, sr, beat_times, bpm, intro_is_rhythmic)
         audio_list = [
-            (np.random.randn(22050).astype(np.float32), 22050)
+            (np.random.randn(22050).astype(np.float32), 22050, [], 0.0, True)
             for _ in range(3)
         ]
 
         with patch.dict(sys.modules, {"torch": mock_torch}), \
              patch("src.models._resample", side_effect=lambda y, **kw: y), \
              patch("src.models._clap_device", None), \
+             patch("src.models._clap_embed_dtype", None), \
+             patch("src.models._PROBED_BATCH_SIZE", 1), \
              patch("src.models._get_clap_model", return_value=(mock_model, mock_processor)):
             embeddings = compute_embeddings_batch(audio_list)
 
@@ -383,7 +392,7 @@ class TestScanDirectory:
                 bpm=120.0, key="C major",
                 audio=np.zeros(100, dtype=np.float32), sr=44100,
                 beat_times=[0.0, 0.5], downbeat_times=[0.0],
-                fingerprint="",
+                fingerprint="", duration_sec=3.0,
             )
 
         mock_analyse.side_effect = fake_analyse
@@ -465,3 +474,274 @@ class TestSupportedExtensions:
     def test_common_formats_included(self):
         for ext in (".mp3", ".wav", ".flac", ".ogg", ".m4a"):
             assert ext in SUPPORTED_EXTENSIONS
+
+
+# =========================================================================
+# _select_embed_dtype tests
+# =========================================================================
+
+
+class TestSelectEmbedDtype:
+    """_select_embed_dtype selects the right precision for the device."""
+
+    def _make_device(self, type_: str):
+        dev = MagicMock()
+        dev.type = type_
+        return dev
+
+    def test_cpu_returns_float32(self):
+        import sys
+        mock_torch = MagicMock()
+        mock_torch.float32 = "float32"
+        mock_torch.float16 = "float16"
+        mock_torch.bfloat16 = "bfloat16"
+        with patch.dict(sys.modules, {"torch": mock_torch}):
+            result = _select_embed_dtype(self._make_device("cpu"))
+        assert result == mock_torch.float32
+
+    def test_cuda_ampere_returns_bfloat16(self):
+        import sys
+        mock_torch = MagicMock()
+        mock_torch.float32 = "float32"
+        mock_torch.float16 = "float16"
+        mock_torch.bfloat16 = "bfloat16"
+        mock_torch.cuda.get_device_capability.return_value = (8, 0)
+        with patch.dict(sys.modules, {"torch": mock_torch}):
+            result = _select_embed_dtype(self._make_device("cuda"))
+        assert result == mock_torch.bfloat16
+
+    def test_cuda_turing_returns_float16(self):
+        import sys
+        mock_torch = MagicMock()
+        mock_torch.float32 = "float32"
+        mock_torch.float16 = "float16"
+        mock_torch.bfloat16 = "bfloat16"
+        mock_torch.cuda.get_device_capability.return_value = (7, 5)
+        with patch.dict(sys.modules, {"torch": mock_torch}):
+            result = _select_embed_dtype(self._make_device("cuda"))
+        assert result == mock_torch.float16
+
+    def test_cuda_old_returns_float32(self):
+        import sys
+        mock_torch = MagicMock()
+        mock_torch.float32 = "float32"
+        mock_torch.float16 = "float16"
+        mock_torch.bfloat16 = "bfloat16"
+        mock_torch.cuda.get_device_capability.return_value = (6, 1)
+        with patch.dict(sys.modules, {"torch": mock_torch}):
+            result = _select_embed_dtype(self._make_device("cuda"))
+        assert result == mock_torch.float32
+
+    def test_mps_returns_bfloat16(self):
+        import sys
+        mock_torch = MagicMock()
+        mock_torch.float32 = "float32"
+        mock_torch.bfloat16 = "bfloat16"
+        with patch.dict(sys.modules, {"torch": mock_torch}):
+            result = _select_embed_dtype(self._make_device("mps"))
+        assert result == mock_torch.bfloat16
+
+
+# =========================================================================
+# _detect_intro_type tests
+# =========================================================================
+
+
+class TestDetectIntroType:
+    """_detect_intro_type classifies pre-beat intros correctly."""
+
+    def test_short_intro_returns_true(self):
+        """Intro ≤ 5 s is always classified as rhythmic (no analysis needed)."""
+        y = np.random.randn(44100 * 10).astype(np.float32)
+        result = _detect_intro_type(y, 44100, beat_times=[3.0, 3.5, 4.0], bpm=120.0)
+        assert result is True
+
+    def test_no_beats_returns_true(self):
+        y = np.random.randn(44100).astype(np.float32)
+        assert _detect_intro_type(y, 44100, beat_times=[], bpm=0.0) is True
+
+    def test_zero_bpm_returns_true(self):
+        y = np.random.randn(44100).astype(np.float32)
+        assert _detect_intro_type(y, 44100, beat_times=[10.0], bpm=0.0) is True
+
+    def test_rhythmic_intro_detected(self):
+        """Audio with energy only on expected beat positions → True."""
+        sr = 44100
+        bpm = 120.0
+        beat_interval = 60.0 / bpm  # 0.5 s
+
+        # Build ~20 s of silence, then place impulses at expected beat positions.
+        total_samples = int(20 * sr)
+        y = np.zeros(total_samples, dtype=np.float32)
+
+        # First real beat at 10 s; expected beats extrapolate backward.
+        first_beat = 10.0
+        beat_times = [first_beat + i * beat_interval for i in range(10)]
+
+        t = first_beat - beat_interval
+        win = int(0.01 * sr)  # small impulse window
+        while t >= 0.0:
+            center = int(t * sr)
+            y[max(0, center - win): center + win] = 1.0
+            t -= beat_interval
+
+        result = _detect_intro_type(y, sr, beat_times=beat_times, bpm=bpm)
+        assert result is True  # ratio >> 2.0
+
+    def test_silent_intro_detected_as_beatless(self):
+        """Completely silent intro → ratio ≈ 1 → False (genuinely beatless)."""
+        sr = 44100
+        bpm = 120.0
+        beat_interval = 60.0 / bpm
+
+        # 20 s of white noise uniformly distributed (no beat accent pattern).
+        rng = np.random.default_rng(seed=0)
+        y = rng.standard_normal(int(20 * sr)).astype(np.float32) * 0.01
+
+        first_beat = 10.0
+        beat_times = [first_beat + i * beat_interval for i in range(10)]
+
+        # No impulses → on-beat and off-beat RMS are both ~equal (noise floor).
+        result = _detect_intro_type(y, sr, beat_times=beat_times, bpm=bpm)
+        # With uniform noise the ratio should be ≈ 1.0 → below threshold of 2.0
+        assert result is False
+
+
+# =========================================================================
+# _phrase_chunks tests
+# =========================================================================
+
+
+class TestPhraseChunks:
+    """_phrase_chunks produces correct phrase-aligned audio segments."""
+
+    SR = 24_000  # MERT target sample rate
+
+    def _beat_times(self, bpm: float, n_beats: int, offset: float = 0.0) -> list[float]:
+        interval = 60.0 / bpm
+        return [offset + i * interval for i in range(n_beats)]
+
+    def test_fallback_fixed_stride_when_few_beats(self):
+        """< 32 beats → fixed-stride fallback, no phrase splitting."""
+        from src.config import CHUNK_MAX_SEC
+        sr = self.SR
+        # 60 s of audio, only 10 beats → fallback to 30 s chunks
+        y = np.zeros(60 * sr, dtype=np.float32)
+        beats = self._beat_times(120.0, 10, offset=0.5)
+        chunks = _phrase_chunks(y, sr, beats, bpm=120.0, intro_is_rhythmic=True)
+        # Expect two 30 s chunks
+        assert len(chunks) == 2
+        assert all(len(c) <= CHUNK_MAX_SEC * sr for c in chunks)
+
+    def test_phrase_split_on_32_beats(self):
+        """≥ 32 beats → split at every 32nd beat."""
+        sr = self.SR
+        bpm = 120.0
+        # 90 s of audio, 180 beats → 5+ phrases of ~16 s each (32 beats × 0.5 s)
+        y = np.zeros(int(90 * sr), dtype=np.float32)
+        beats = self._beat_times(bpm, 180, offset=0.0)
+        chunks = _phrase_chunks(y, sr, beats, bpm=bpm, intro_is_rhythmic=True)
+        # 180 beats → split points at indices 0, 32, 64, 96, 128, 160 → 5 phrases
+        assert len(chunks) >= 2
+        # All chunks should respect max (30 s) and be ≥ 1 s
+        assert all(len(c) >= sr for c in chunks)
+        assert all(len(c) <= 30 * sr for c in chunks)
+
+    def test_beatless_intro_dropped(self):
+        """intro_is_rhythmic=False → pre-beat region is discarded."""
+        sr = self.SR
+        bpm = 120.0
+        # 10 s intro + 64 beats of content
+        intro_len = int(10 * sr)
+        beat_offset = 10.0
+        beats = self._beat_times(bpm, 64, offset=beat_offset)
+        y = np.ones(int(beat_offset * sr) + len(beats) * int(60 / bpm * sr) + sr,
+                    dtype=np.float32)
+        # Mark intro region with a distinct value to verify it's excluded
+        y[:intro_len] = 99.0
+
+        chunks = _phrase_chunks(y, sr, beats, bpm=bpm, intro_is_rhythmic=False)
+        # None of the chunks should start with the intro marker
+        for c in chunks:
+            assert not np.any(c == 99.0), "Beatless intro leaked into a chunk"
+
+    def test_rhythmic_intro_prepended_when_short(self):
+        """Short rhythmic intro (< 12 s) is prepended to phrase 1."""
+        from src.config import CHUNK_MIN_SEC
+        sr = self.SR
+        bpm = 120.0
+        # 5 s intro (< min_sec=12) + 64 beats of content
+        intro_sec = 5
+        beat_offset = float(intro_sec)
+        beats = self._beat_times(bpm, 64, offset=beat_offset)
+        duration = int((beat_offset + 64 * (60 / bpm) + 1) * sr)
+        y = np.zeros(duration, dtype=np.float32)
+
+        chunks = _phrase_chunks(y, sr, beats, bpm=bpm, intro_is_rhythmic=True)
+        # First chunk should be longer than a lone 16 s phrase (it includes the 5 s intro)
+        phrase_samples = int(32 * (60 / bpm) * sr)
+        assert len(chunks[0]) >= phrase_samples  # intro prepended
+
+    def test_long_rhythmic_intro_is_own_chunk(self):
+        """Long rhythmic intro (≥ 12 s) becomes its own chunk."""
+        from src.config import CHUNK_MIN_SEC
+        sr = self.SR
+        bpm = 120.0
+        intro_sec = 15  # > CHUNK_MIN_SEC=12
+        beat_offset = float(intro_sec)
+        beats = self._beat_times(bpm, 64, offset=beat_offset)
+        duration = int((beat_offset + 64 * (60 / bpm) + 1) * sr)
+        y = np.zeros(duration, dtype=np.float32)
+
+        chunks = _phrase_chunks(y, sr, beats, bpm=bpm, intro_is_rhythmic=True)
+        # All chunks should be ≥ 12 s (min clamp), first is the standalone intro
+        assert all(len(c) >= CHUNK_MIN_SEC * sr for c in chunks)
+
+    def test_max_clamp_splits_long_phrases(self):
+        """A single phrase > 30 s is split with fixed stride."""
+        from src.config import CHUNK_MAX_SEC
+        sr = self.SR
+        bpm = 30.0  # 32 beats × 2 s = 64 s per phrase → exceeds 30 s max
+        beats = self._beat_times(bpm, 64, offset=0.0)
+        duration = int((64 * (60 / bpm) + 1) * sr)
+        y = np.zeros(duration, dtype=np.float32)
+
+        chunks = _phrase_chunks(y, sr, beats, bpm=bpm, intro_is_rhythmic=True)
+        assert all(len(c) <= CHUNK_MAX_SEC * sr for c in chunks)
+
+
+# =========================================================================
+# _optimal_worker_count tests
+# =========================================================================
+
+
+class TestOptimalWorkerCount:
+    """_optimal_worker_count respects CPU and RAM constraints."""
+
+    def test_returns_at_least_one(self):
+        result = _optimal_worker_count()
+        assert result >= 1
+
+    def test_capped_at_eight(self):
+        with patch("os.cpu_count", return_value=64):
+            try:
+                import psutil
+                with patch.object(psutil, "cpu_count", return_value=32), \
+                     patch.object(psutil, "virtual_memory",
+                                  return_value=MagicMock(available=256 * 1024 ** 3)):
+                    result = _optimal_worker_count()
+            except ImportError:
+                result = _optimal_worker_count()
+        assert result <= 8
+
+    def test_ram_cap_limits_workers(self):
+        """With only 1.5 GB available, at most 1 worker should be allowed."""
+        try:
+            import psutil
+            with patch.object(psutil, "cpu_count", return_value=8), \
+                 patch.object(psutil, "virtual_memory",
+                              return_value=MagicMock(available=int(1.5 * 1024 ** 3))):
+                result = _optimal_worker_count()
+            assert result == 1
+        except ImportError:
+            pytest.skip("psutil not installed")
