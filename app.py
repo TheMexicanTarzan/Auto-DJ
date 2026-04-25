@@ -65,6 +65,7 @@ _graph_state: dict = {
     "current_file": "",
     "error": None,           # str | None
     "version": 0,            # bumped on every graph mutation
+    "fingerprint_enabled": False,
 }
 
 
@@ -106,6 +107,7 @@ def _load_graph_background() -> None:
                     SONGS_DIRECTORY,
                     progress_callback=_progress_callback,
                     exclude_dirs={SETLISTS_DIRECTORY},
+                    enable_fingerprint=_graph_state["fingerprint_enabled"],
                 )
             except (NotADirectoryError, OSError) as exc:
                 logger.warning(
@@ -182,6 +184,7 @@ def _load_graph_background() -> None:
                 new_paths,
                 progress_callback=_progress_callback,
                 known_fingerprints=graph.known_fingerprints,
+                enable_fingerprint=_graph_state["fingerprint_enabled"],
             )
 
         # --- Apply all mutations in a tight block ---
@@ -779,6 +782,30 @@ def api_umap_status():
         "mode": mode,
         "umap_available": umap_available,
     })
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint setting endpoints
+# ---------------------------------------------------------------------------
+
+class FingerprintSettingRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/settings/fingerprint")
+def api_settings_fingerprint_post(req: FingerprintSettingRequest):
+    """Enable or disable Chromaprint fingerprint deduplication for future scans."""
+    with _graph_lock:
+        _graph_state["fingerprint_enabled"] = req.enabled
+    return _orjson_response({"fingerprint_enabled": req.enabled})
+
+
+@app.get("/api/settings/fingerprint")
+def api_settings_fingerprint_get():
+    """Return the current fingerprint deduplication setting."""
+    with _graph_lock:
+        enabled = _graph_state["fingerprint_enabled"]
+    return _orjson_response({"fingerprint_enabled": enabled})
 
 
 # ---------------------------------------------------------------------------

@@ -1562,7 +1562,40 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
 }());
 
 // =========================================================================
-// 12. Bootstrap
+// 12. Fingerprint setting
+// =========================================================================
+
+(function () {
+  var fpCb  = document.getElementById("fingerprint-enabled");
+  var fpMsg = document.getElementById("fingerprint-msg");
+
+  fetch("/api/settings/fingerprint")
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      fpCb.checked = !!data.fingerprint_enabled;
+      fpMsg.textContent = data.fingerprint_enabled
+        ? "On — Chromaprint will check for cross-format duplicates."
+        : "Off — only byte-identical files are deduplicated.";
+    })
+    .catch(function () { /* non-fatal */ });
+
+  fpCb.addEventListener("change", async function () {
+    try {
+      var resp = await fetch("/api/settings/fingerprint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: fpCb.checked }),
+      });
+      var data = await resp.json();
+      fpMsg.textContent = data.fingerprint_enabled
+        ? "On — Chromaprint will check for cross-format duplicates."
+        : "Off — only byte-identical files are deduplicated.";
+    } catch (err) { /* non-fatal */ }
+  });
+}());
+
+// =========================================================================
+// 13. Bootstrap
 // =========================================================================
 
 startPolling();

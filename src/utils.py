@@ -134,6 +134,7 @@ def scan_directory(
     directory: str | Path,
     progress_callback: callable | None = None,
     exclude_dirs: set[Path] | None = None,
+    enable_fingerprint: bool = False,
 ) -> list[Song]:
     """
     Recursively scan *directory* for audio files and return a deduplicated
@@ -230,7 +231,7 @@ def scan_directory(
         if chunks:
             # Pre-submit the first chunk so workers start immediately.
             current_futures = [
-                executor.submit(analyse_audio, str(p)) for p in chunks[0]
+                executor.submit(analyse_audio, str(p), enable_fingerprint) for p in chunks[0]
             ]
 
             for chunk_idx, chunk_paths in enumerate(chunks):
@@ -238,7 +239,7 @@ def scan_directory(
                 # current chunk — CPU workers overlap with GPU inference.
                 if chunk_idx + 1 < len(chunks):
                     next_futures = [
-                        executor.submit(analyse_audio, str(p))
+                        executor.submit(analyse_audio, str(p), enable_fingerprint)
                         for p in chunks[chunk_idx + 1]
                     ]
                 else:
@@ -283,37 +284,45 @@ def scan_directory(
 
                 current_futures = next_futures
 
-    # --- Phase 3: fingerprint-based deduplication ---
-    # Catches cross-format / cross-album duplicates that SHA-256 misses
-    # (e.g. same song as .mp3 and .flac with different binary content).
-    accepted: list[Song] = []
-    fp_dupes = 0
-    for song in songs:
-        if not song.fingerprint:
-            accepted.append(song)
-            continue
-        is_dup = False
-        for existing in accepted:
-            if existing.fingerprint and _fingerprint_match(song.fingerprint, existing.fingerprint):
-                logger.warning(
-                    "Skipping fingerprint duplicate: '%s' (matches '%s').",
-                    song.filename,
-                    existing.filename,
-                )
-                fp_dupes += 1
-                is_dup = True
-                break
-        if not is_dup:
-            accepted.append(song)
+    if enable_fingerprint:
+        # --- Phase 3: fingerprint-based deduplication ---
+        # Catches cross-format / cross-album duplicates that SHA-256 misses
+        # (e.g. same song as .mp3 and .flac with different binary content).
+        accepted: list[Song] = []
+        fp_dupes = 0
+        for song in songs:
+            if not song.fingerprint:
+                accepted.append(song)
+                continue
+            is_dup = False
+            for existing in accepted:
+                if existing.fingerprint and _fingerprint_match(song.fingerprint, existing.fingerprint):
+                    logger.warning(
+                        "Skipping fingerprint duplicate: '%s' (matches '%s').",
+                        song.filename,
+                        existing.filename,
+                    )
+                    fp_dupes += 1
+                    is_dup = True
+                    break
+            if not is_dup:
+                accepted.append(song)
+
+        logger.info(
+            "Scan complete: %d song(s) loaded, %d hash duplicate(s) skipped, "
+            "%d fingerprint duplicate(s) skipped.",
+            len(accepted),
+            skipped,
+            fp_dupes,
+        )
+        return accepted
 
     logger.info(
-        "Scan complete: %d song(s) loaded, %d hash duplicate(s) skipped, "
-        "%d fingerprint duplicate(s) skipped.",
-        len(accepted),
+        "Scan complete: %d song(s) loaded, %d hash duplicate(s) skipped.",
+        len(songs),
         skipped,
-        fp_dupes,
     )
-    return accepted
+    return songs
 
 
 def discover_changes(
@@ -373,6 +382,7 @@ def analyse_new_songs(
     paths: list[Path],
     progress_callback: callable | None = None,
     known_fingerprints: dict[str, str] | None = None,
+    enable_fingerprint: bool = False,
 ) -> list[Song]:
     """
     Analyse a list of audio file paths and return Song objects.
@@ -408,13 +418,13 @@ def analyse_new_songs(
     ) as executor:
         if chunks:
             current_futures = [
-                executor.submit(analyse_audio, str(p)) for p in chunks[0]
+                executor.submit(analyse_audio, str(p), enable_fingerprint) for p in chunks[0]
             ]
 
             for chunk_idx, chunk_paths in enumerate(chunks):
                 if chunk_idx + 1 < len(chunks):
                     next_futures = [
-                        executor.submit(analyse_audio, str(p))
+                        executor.submit(analyse_audio, str(p), enable_fingerprint)
                         for p in chunks[chunk_idx + 1]
                     ]
                 else:
@@ -455,7 +465,7 @@ def analyse_new_songs(
                 current_futures = next_futures
 
     # Fingerprint dedup against existing graph songs
-    if known_fingerprints:
+    if enable_fingerprint and known_fingerprints:
         accepted: list[Song] = []
         for song in songs:
             if song.fingerprint:

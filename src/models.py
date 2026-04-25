@@ -541,7 +541,7 @@ def _compute_fingerprint(y: np.ndarray, sr: int) -> str:
     return encoded
 
 
-def analyse_audio(path: str | Path) -> AudioAnalysis:
+def analyse_audio(path: str | Path, enable_fingerprint: bool = False) -> AudioAnalysis:
     """
     Load an audio file and compute BPM, key, beats, and downbeats
     (everything *except* the CLAP embedding).
@@ -584,7 +584,7 @@ def analyse_audio(path: str | Path) -> AudioAnalysis:
     key = _estimate_key(y, sr)
 
     # Audio fingerprint (Chromaprint)
-    fingerprint = _compute_fingerprint(y, sr)
+    fingerprint = _compute_fingerprint(y, sr) if enable_fingerprint else ""
 
     return AudioAnalysis(
         file_path=str(path),
