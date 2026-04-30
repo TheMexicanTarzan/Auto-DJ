@@ -863,6 +863,20 @@ function populateSearch() {
   setupAutocomplete("details-search", "details-results", function (id) {
     loadNodeDetails(id);
   });
+
+  // Setlist start/end song search — wired here so songList is already populated.
+  if (window._slState) {
+    wireAutocomplete(
+      document.getElementById("sl-start-song-input"),
+      document.getElementById("sl-start-song-results"),
+      window._slState.onStartSelect
+    );
+    wireAutocomplete(
+      document.getElementById("sl-end-song-input"),
+      document.getElementById("sl-end-song-results"),
+      window._slState.onEndSelect
+    );
+  }
 }
 
 /**
@@ -1153,18 +1167,6 @@ function clearHighlights() {
     });
   });
 
-  // --- autocomplete for start/end song ---
-  wireAutocomplete(
-    document.getElementById("sl-start-song-input"),
-    document.getElementById("sl-start-song-results"),
-    function (id) { slStartSongId = id; checkSetlistConflict(); }
-  );
-  wireAutocomplete(
-    document.getElementById("sl-end-song-input"),
-    document.getElementById("sl-end-song-results"),
-    function (id) { slEndSongId = id; checkSetlistConflict(); }
-  );
-
   // --- conflict detection ---
   function checkSetlistConflict() {
     var msgEl = document.getElementById("sl-conflict-msg");
@@ -1308,13 +1310,16 @@ function clearHighlights() {
     input.focus();
   });
 
-  // Expose state so the generate-setlist-btn handler (defined below) can read it.
+  // Expose state and onSelect callbacks so populateSearch() can wire autocomplete
+  // after the graph/song list has loaded (same lifecycle as other search inputs).
   window._slState = {
-    getStartMode:  function () { return slStartMode; },
-    getEndMode:    function () { return slEndMode; },
+    getStartMode:   function () { return slStartMode; },
+    getEndMode:     function () { return slEndMode; },
     getStartSongId: function () { return slStartSongId; },
-    getEndSongId:  function () { return slEndSongId; },
-    getWaypoints:  function () { return slWaypoints; },
+    getEndSongId:   function () { return slEndSongId; },
+    getWaypoints:   function () { return slWaypoints; },
+    onStartSelect:  function (id) { slStartSongId = id; checkSetlistConflict(); },
+    onEndSelect:    function (id) { slEndSongId = id;   checkSetlistConflict(); },
   };
 }());
 
