@@ -1230,7 +1230,10 @@ function clearHighlights() {
     sw.appendChild(results);
     row.appendChild(sw);
 
-    // Position mode select
+    // Controls sub-row: position mode, minute, segment key
+    var controls = document.createElement("div");
+    controls.className = "waypoint-controls";
+
     var posSelect = document.createElement("select");
     var optSeq = document.createElement("option");
     optSeq.value = "sequential";
@@ -1240,16 +1243,16 @@ function clearHighlights() {
     optTimed.textContent = "Timed";
     posSelect.appendChild(optSeq);
     posSelect.appendChild(optTimed);
-    row.appendChild(posSelect);
+    controls.appendChild(posSelect);
 
-    // Minute input (hidden by default)
     var minuteInput = document.createElement("input");
     minuteInput.type = "number";
     minuteInput.min = "0";
     minuteInput.step = "0.5";
-    minuteInput.placeholder = "minute";
+    minuteInput.placeholder = "min";
+    minuteInput.style.width = "64px";
     minuteInput.style.display = "none";
-    row.appendChild(minuteInput);
+    controls.appendChild(minuteInput);
 
     posSelect.addEventListener("change", function () {
       wp.positionMode = posSelect.value;
@@ -1259,10 +1262,9 @@ function clearHighlights() {
       wp.minute = minuteInput.value !== "" ? parseFloat(minuteInput.value) : null;
     });
 
-    // Segment key select
     var segKeySpan = document.createElement("span");
-    segKeySpan.textContent = "Key for this segment";
-    row.appendChild(segKeySpan);
+    segKeySpan.textContent = "Segment key";
+    controls.appendChild(segKeySpan);
 
     var segKeySelect = document.createElement("select");
     var keyOptions = [
@@ -1285,7 +1287,9 @@ function clearHighlights() {
     segKeySelect.addEventListener("change", function () {
       wp.segmentKey = segKeySelect.value || null;
     });
-    row.appendChild(segKeySelect);
+    controls.appendChild(segKeySelect);
+
+    row.appendChild(controls);
 
     // Remove button
     var removeBtn = document.createElement("button");
