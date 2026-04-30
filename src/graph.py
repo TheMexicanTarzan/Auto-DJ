@@ -906,6 +906,10 @@ class DJGraph:
         excluded_dirs: set[str] | None = None,
         songs_directory: str | None = None,
         max_attempts: int = 60,
+        starting_song: str | None = None,
+        ending_key: str | None = None,
+        ending_song: str | None = None,
+        waypoints: list[dict] | None = None,
     ) -> list[Song]:
         """
         Build a randomised continuous setlist by walking the mixing graph.
@@ -974,12 +978,31 @@ class DJGraph:
                 f"No songs match the specified BPM range{suffix}."
             )
 
-        # Starting candidates: allowed pool filtered by starting_key.
-        start_pool: list[Song] = [
-            s for s in self._songs.values()
-            if s.file_path in allowed_pool
-            and (starting_key is None or s.key == starting_key)
-        ]
+        # Validate and resolve pinned starting song.
+        pinned_start: Song | None = None
+        if starting_song is not None:
+            pinned_start = self._songs.get(starting_song)
+            if pinned_start is None:
+                raise ValueError("Starting song not found in graph.")
+            allowed_pool.add(pinned_start.file_path)
+
+        # Validate and resolve pinned ending song.
+        pinned_end: Song | None = None
+        if ending_song is not None:
+            pinned_end = self._songs.get(ending_song)
+            if pinned_end is None:
+                raise ValueError("Ending song not found in graph.")
+
+        # Starting candidates: allowed pool filtered by starting_key (ignored
+        # when starting_song is supplied).
+        if pinned_start is not None:
+            start_pool: list[Song] = [pinned_start]
+        else:
+            start_pool = [
+                s for s in self._songs.values()
+                if s.file_path in allowed_pool
+                and (starting_key is None or s.key == starting_key)
+            ]
 
         if not start_pool:
             parts: list[str] = []
@@ -992,6 +1015,136 @@ class DJGraph:
                 f"No songs match {detail} within the BPM range."
             )
 
+        # Effective ending key: ending_song takes precedence.
+        effective_ending_key: str | None = None if pinned_end is not None else ending_key
+
+        # ------------------------------------------------------------------
+        # Helper: run one greedy segment walk.
+        # ------------------------------------------------------------------
+        def _greedy_segment(
+            forced_start: Song | None,
+            seg_target_sec: float,
+            seg_set_key: str | None,
+            seg_ending_key: str | None = None,
+        ) -> list[Song]:
+            seg_allowed: set[str] = {
+                fp for fp in allowed_pool
+                if seg_set_key is None or self._songs[fp].key == seg_set_key
+            }
+            if forced_start is not None:
+                seg_allowed.add(forced_start.file_path)
+
+            if forced_start is not None:
+                seg_start: list[Song] = [forced_start]
+            else:
+                seg_start = [
+                    s for s in self._songs.values()
+                    if s.file_path in seg_allowed
+                    and (starting_key is None or s.key == starting_key)
+                ]
+            if not seg_start:
+                return []
+
+            seg_best: list[Song] = []
+            seg_best_total = 0.0
+            for _ in range(max_attempts):
+                cur = random.choice(seg_start)
+                sl: list[Song] = [cur]
+                vis: set[str] = {cur.file_path}
+                tot = song_duration(cur)
+                while tot < seg_target_sec:
+                    base_c: list[tuple[Song, float]] = [
+                        (nbr, cost)
+                        for nbr, cost, _ in self.neighbours(
+                            cur.file_path,
+                            allowed_types=allowed_types,
+                            excluded_dirs=excluded_dirs,
+                            songs_directory=songs_directory,
+                        )
+                        if nbr.file_path not in vis
+                        and nbr.file_path in seg_allowed
+                    ]
+                    if not base_c:
+                        break
+                    if seg_ending_key and tot > 0.75 * seg_target_sec:
+                        narrowed_c = [(s, c) for s, c in base_c if s.key == seg_ending_key]
+                        cands_c = narrowed_c if narrowed_c else base_c
+                    else:
+                        cands_c = base_c
+                    shortlist_c = cands_c[: min(10, len(cands_c))]
+                    nxt = random.choice(shortlist_c)[0]
+                    sl.append(nxt)
+                    vis.add(nxt.file_path)
+                    tot += song_duration(nxt)
+                    cur = nxt
+                if tot >= seg_target_sec:
+                    return sl
+                if tot > seg_best_total:
+                    seg_best_total = tot
+                    seg_best = sl
+            return seg_best
+
+        # ------------------------------------------------------------------
+        # Waypoints mode: generate each segment independently.
+        # ------------------------------------------------------------------
+        if waypoints:
+            # Validate all waypoint songs.
+            for wp_dict in waypoints:
+                wp_path = wp_dict["song"]
+                if wp_path not in self._songs:
+                    raise ValueError(f"Waypoint song not found: {wp_path}")
+
+            time_pinned = sorted(
+                [w for w in waypoints if w.get("minute") is not None],
+                key=lambda w: w["minute"],
+            )
+            sequential = [w for w in waypoints if w.get("minute") is None]
+
+            # Build segment list: (duration_sec, set_key_override, waypoint_song | None)
+            segments: list[tuple[float, str | None, Song | None]] = []
+            prev_boundary_sec = 0.0
+            for wp_dict in time_pinned:
+                boundary_sec = wp_dict["minute"] * 60.0
+                seg_dur = max(0.0, boundary_sec - prev_boundary_sec)
+                sk = wp_dict.get("segment_key") or set_key
+                segments.append((seg_dur, sk, self._songs[wp_dict["song"]]))
+                prev_boundary_sec = boundary_sec
+
+            pinned_total = prev_boundary_sec
+            remaining_sec = max(0.0, target_sec - pinned_total)
+            n_tail_segs = len(sequential) + 1
+            seg_share = remaining_sec / n_tail_segs if n_tail_segs > 0 else remaining_sec
+            for wp_dict in sequential:
+                sk = wp_dict.get("segment_key") or set_key
+                segments.append((seg_share, sk, self._songs[wp_dict["song"]]))
+            segments.append((seg_share, set_key, None))  # tail segment
+
+            # Generate each segment.
+            full_setlist: list[Song] = []
+            forced: Song | None = pinned_start
+            for seg_idx, (seg_dur, seg_sk, junction_song) in enumerate(segments):
+                seg_songs = _greedy_segment(forced, seg_dur, seg_sk)
+                if seg_idx == 0:
+                    full_setlist.extend(seg_songs)
+                else:
+                    # Skip first song if it duplicates the junction.
+                    start_offset = 1 if (seg_songs and full_setlist and
+                                         seg_songs[0].file_path == full_setlist[-1].file_path) else 0
+                    full_setlist.extend(seg_songs[start_offset:])
+
+                if junction_song is not None:
+                    if not full_setlist or full_setlist[-1].file_path != junction_song.file_path:
+                        full_setlist.append(junction_song)
+                    forced = junction_song
+                elif seg_songs:
+                    forced = seg_songs[-1]
+
+            if pinned_end is not None:
+                if not full_setlist or full_setlist[-1].file_path != pinned_end.file_path:
+                    full_setlist.append(pinned_end)
+
+            return full_setlist
+
         best_setlist: list[Song] = []
         best_total: float = 0.0
 
@@ -1002,9 +1155,9 @@ class DJGraph:
             total = song_duration(current)
 
             while total < target_sec:
-                candidates: list[Song] = [
-                    nbr
-                    for nbr, _cost, _etype in self.neighbours(
+                base_candidates: list[tuple[Song, float]] = [
+                    (nbr, cost)
+                    for nbr, cost, _etype in self.neighbours(
                         current.file_path,
                         allowed_types=allowed_types,
                         excluded_dirs=excluded_dirs,
@@ -1014,14 +1167,31 @@ class DJGraph:
                     and nbr.file_path in allowed_pool
                 ]
 
-                if not candidates:
+                if not base_candidates:
                     break
 
-                next_song = random.choice(candidates)
+                # Narrow to ending key once past 75 % of target duration.
+                if effective_ending_key and total > 0.75 * target_sec:
+                    narrowed = [
+                        (s, c) for s, c in base_candidates
+                        if s.key == effective_ending_key
+                    ]
+                    candidates = narrowed if narrowed else base_candidates
+                else:
+                    candidates = base_candidates
+
+                shortlist = candidates[: min(10, len(candidates))]
+                next_song = random.choice(shortlist)[0]
                 setlist.append(next_song)
                 visited.add(next_song.file_path)
                 total += song_duration(next_song)
                 current = next_song
+
+            # Append pinned ending song if needed.
+            if pinned_end is not None:
+                if not setlist or setlist[-1].file_path != pinned_end.file_path:
+                    if pinned_end.file_path not in visited:
+                        setlist.append(pinned_end)
 
             if total >= target_sec:
                 return setlist

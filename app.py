@@ -514,6 +514,12 @@ def api_path(req: PathRequest):
     })
 
 
+class WaypointRequest(BaseModel):
+    song: str
+    minute: float | None = None
+    segment_key: str | None = None
+
+
 class SetlistRequest(BaseModel):
     min_bpm: float = 0.0
     max_bpm: float = 999.0
@@ -522,6 +528,10 @@ class SetlistRequest(BaseModel):
     set_key: str | None = None          # key constraint for all tracks (optional)
     allowed_types: list[str] | None = None
     excluded_dirs: list[str] | None = None
+    starting_song: str | None = None
+    ending_key: str | None = None
+    ending_song: str | None = None
+    waypoints: list[WaypointRequest] | None = None
 
 
 @app.post("/api/setlist")
@@ -540,6 +550,21 @@ def api_setlist(req: SetlistRequest):
     allowed = set(req.allowed_types) if req.allowed_types else None
     excluded = set(req.excluded_dirs) if req.excluded_dirs else None
 
+    # Validate pinned songs against the graph before calling generate_setlist.
+    songs_map = graph._songs
+    if req.starting_song and req.starting_song not in songs_map:
+        return _orjson_response({"error": "Starting song not found in graph."}, status_code=400)
+    if req.ending_song and req.ending_song not in songs_map:
+        return _orjson_response({"error": "Ending song not found in graph."}, status_code=400)
+    if req.waypoints:
+        for wp in req.waypoints:
+            if wp.song not in songs_map:
+                return _orjson_response(
+                    {"error": f"Waypoint song not found: {wp.song}"}, status_code=400
+                )
+
+    waypoints_dicts = [wp.model_dump() for wp in req.waypoints] if req.waypoints else None
+
     try:
         songs = graph.generate_setlist(
             min_bpm=req.min_bpm,
@@ -550,6 +575,10 @@ def api_setlist(req: SetlistRequest):
             allowed_types=allowed,
             excluded_dirs=excluded,
             songs_directory=SONGS_DIRECTORY,
+            starting_song=req.starting_song or None,
+            ending_key=req.ending_key or None,
+            ending_song=req.ending_song or None,
+            waypoints=waypoints_dicts,
         )
     except ValueError as exc:
         return _orjson_response({"error": str(exc)}, status_code=400)

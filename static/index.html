@@ -94,36 +94,48 @@
             <input type="number" id="sl-target-duration" value="60" min="1" step="1">
           </div>
 
-          <!-- Starting Key -->
+          <!-- Starting point -->
           <div class="sl-field">
-            <label for="sl-starting-key">Starting Key (optional)</label>
-            <select id="sl-starting-key">
-              <option value="">Any key</option>
-              <option value="C major">C major</option>
-              <option value="C# major">C# major</option>
-              <option value="D major">D major</option>
-              <option value="D# major">D# major</option>
-              <option value="E major">E major</option>
-              <option value="F major">F major</option>
-              <option value="F# major">F# major</option>
-              <option value="G major">G major</option>
-              <option value="G# major">G# major</option>
-              <option value="A major">A major</option>
-              <option value="A# major">A# major</option>
-              <option value="B major">B major</option>
-              <option value="C minor">C minor</option>
-              <option value="C# minor">C# minor</option>
-              <option value="D minor">D minor</option>
-              <option value="D# minor">D# minor</option>
-              <option value="E minor">E minor</option>
-              <option value="F minor">F minor</option>
-              <option value="F# minor">F# minor</option>
-              <option value="G minor">G minor</option>
-              <option value="G# minor">G# minor</option>
-              <option value="A minor">A minor</option>
-              <option value="A# minor">A# minor</option>
-              <option value="B minor">B minor</option>
-            </select>
+            <label>Starting point</label>
+            <div class="mode-toggle" id="sl-start-mode-toggle">
+              <button class="mode-btn active" data-mode="key">Key</button>
+              <button class="mode-btn" data-mode="song">Song</button>
+            </div>
+            <div id="sl-start-key-wrap">
+              <select id="sl-starting-key">
+                <option value="">Any key</option>
+                <option value="C major">C major</option>
+                <option value="C# major">C# major</option>
+                <option value="D major">D major</option>
+                <option value="D# major">D# major</option>
+                <option value="E major">E major</option>
+                <option value="F major">F major</option>
+                <option value="F# major">F# major</option>
+                <option value="G major">G major</option>
+                <option value="G# major">G# major</option>
+                <option value="A major">A major</option>
+                <option value="A# major">A# major</option>
+                <option value="B major">B major</option>
+                <option value="C minor">C minor</option>
+                <option value="C# minor">C# minor</option>
+                <option value="D minor">D minor</option>
+                <option value="D# minor">D# minor</option>
+                <option value="E minor">E minor</option>
+                <option value="F minor">F minor</option>
+                <option value="F# minor">F# minor</option>
+                <option value="G minor">G minor</option>
+                <option value="G# minor">G# minor</option>
+                <option value="A minor">A minor</option>
+                <option value="A# minor">A# minor</option>
+                <option value="B minor">B minor</option>
+              </select>
+            </div>
+            <div id="sl-start-song-wrap" style="display:none">
+              <div class="search-wrapper">
+                <input type="text" id="sl-start-song-input" placeholder="Search for a track..." autocomplete="off">
+                <div class="search-results" id="sl-start-song-results"></div>
+              </div>
+            </div>
           </div>
 
           <!-- Set Key -->
@@ -156,6 +168,63 @@
               <option value="A# minor">A# minor</option>
               <option value="B minor">B minor</option>
             </select>
+          </div>
+
+          <!-- Ending point -->
+          <div class="sl-field">
+            <label>Ending point</label>
+            <div class="mode-toggle" id="sl-end-mode-toggle">
+              <button class="mode-btn active" data-mode="none">None</button>
+              <button class="mode-btn" data-mode="key">Key</button>
+              <button class="mode-btn" data-mode="song">Song</button>
+            </div>
+            <div id="sl-end-key-wrap" style="display:none">
+              <select id="sl-ending-key">
+                <option value="C major">C major</option>
+                <option value="C# major">C# major</option>
+                <option value="D major">D major</option>
+                <option value="D# major">D# major</option>
+                <option value="E major">E major</option>
+                <option value="F major">F major</option>
+                <option value="F# major">F# major</option>
+                <option value="G major">G major</option>
+                <option value="G# major">G# major</option>
+                <option value="A major">A major</option>
+                <option value="A# major">A# major</option>
+                <option value="B major">B major</option>
+                <option value="C minor">C minor</option>
+                <option value="C# minor">C# minor</option>
+                <option value="D minor">D minor</option>
+                <option value="D# minor">D# minor</option>
+                <option value="E minor">E minor</option>
+                <option value="F minor">F minor</option>
+                <option value="F# minor">F# minor</option>
+                <option value="G minor">G minor</option>
+                <option value="G# minor">G# minor</option>
+                <option value="A minor">A minor</option>
+                <option value="A# minor">A# minor</option>
+                <option value="B minor">B minor</option>
+              </select>
+            </div>
+            <div id="sl-end-song-wrap" style="display:none">
+              <div class="search-wrapper">
+                <input type="text" id="sl-end-song-input" placeholder="Search for a track..." autocomplete="off">
+                <div class="search-results" id="sl-end-song-results"></div>
+              </div>
+            </div>
+          </div>
+
+          <p class="output-msg" id="sl-conflict-msg" style="display:none;color:#f59e0b"></p>
+
+          <div class="sl-field">
+            <label>
+              <input type="checkbox" id="sl-waypoints-enabled">
+              Intermediate songs
+            </label>
+          </div>
+          <div id="sl-waypoints-panel" style="display:none">
+            <div id="sl-waypoints-list"></div>
+            <button id="sl-add-waypoint-btn" type="button">+ Add song</button>
           </div>
 
           <button id="generate-setlist-btn">Generate Setlist</button>

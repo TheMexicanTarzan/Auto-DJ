@@ -1112,6 +1112,209 @@ function clearHighlights() {
 
 
 // =========================================================================
+// 8a. Create Setlist — starting/ending mode toggles, conflict detection, waypoints
+// =========================================================================
+
+(function () {
+  var slStartMode = "key";
+  var slEndMode   = "none";
+  var slStartSongId = null;
+  var slEndSongId   = null;
+  var slWaypoints   = [];
+  var slWaypointCounter = 0;
+
+  // --- starting mode toggle ---
+  document.getElementById("sl-start-mode-toggle").querySelectorAll(".mode-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      slStartMode = btn.dataset.mode;
+      document.getElementById("sl-start-mode-toggle").querySelectorAll(".mode-btn").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+      document.getElementById("sl-start-key-wrap").style.display  = slStartMode === "key"  ? "" : "none";
+      document.getElementById("sl-start-song-wrap").style.display = slStartMode === "song" ? "" : "none";
+      slStartSongId = null;
+      document.getElementById("sl-start-song-input").value = "";
+      checkSetlistConflict();
+    });
+  });
+
+  // --- ending mode toggle ---
+  document.getElementById("sl-end-mode-toggle").querySelectorAll(".mode-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      slEndMode = btn.dataset.mode;
+      document.getElementById("sl-end-mode-toggle").querySelectorAll(".mode-btn").forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+      document.getElementById("sl-end-key-wrap").style.display  = slEndMode === "key"  ? "" : "none";
+      document.getElementById("sl-end-song-wrap").style.display = slEndMode === "song" ? "" : "none";
+      slEndSongId = null;
+      document.getElementById("sl-end-song-input").value = "";
+      checkSetlistConflict();
+    });
+  });
+
+  // --- autocomplete for start/end song ---
+  wireAutocomplete(
+    document.getElementById("sl-start-song-input"),
+    document.getElementById("sl-start-song-results"),
+    function (id) { slStartSongId = id; checkSetlistConflict(); }
+  );
+  wireAutocomplete(
+    document.getElementById("sl-end-song-input"),
+    document.getElementById("sl-end-song-results"),
+    function (id) { slEndSongId = id; checkSetlistConflict(); }
+  );
+
+  // --- conflict detection ---
+  function checkSetlistConflict() {
+    var msgEl = document.getElementById("sl-conflict-msg");
+    var setKey = document.getElementById("sl-set-key").value;
+    var parts = [];
+
+    if (slStartMode === "song" && slStartSongId && setKey) {
+      var songKey = graphInstance && graphInstance.hasNode(slStartSongId)
+        ? graphInstance.getNodeAttribute(slStartSongId, "key") : null;
+      if (songKey && songKey !== setKey) {
+        parts.push("starting song (" + songKey + ") vs set key (" + setKey + ")");
+      }
+    }
+    if (slEndMode === "song" && slEndSongId && setKey) {
+      var endKey = graphInstance && graphInstance.hasNode(slEndSongId)
+        ? graphInstance.getNodeAttribute(slEndSongId, "key") : null;
+      if (endKey && endKey !== setKey) {
+        parts.push("ending song (" + endKey + ") vs set key (" + setKey + ")");
+      }
+    }
+
+    if (parts.length > 0) {
+      msgEl.textContent = "Key conflict: " + parts.join("; ")
+        + ". The set key constraint will be relaxed for the pinned track(s).";
+      msgEl.style.display = "";
+    } else {
+      msgEl.style.display = "none";
+    }
+  }
+
+  // Call checkSetlistConflict when set key changes.
+  document.getElementById("sl-set-key").addEventListener("change", checkSetlistConflict);
+
+  // --- waypoints checkbox ---
+  document.getElementById("sl-waypoints-enabled").addEventListener("change", function () {
+    document.getElementById("sl-waypoints-panel").style.display = this.checked ? "" : "none";
+  });
+
+  // --- add waypoint row ---
+  document.getElementById("sl-add-waypoint-btn").addEventListener("click", function () {
+    var key = slWaypointCounter++;
+    var wp = { key: key, id: null, positionMode: "sequential", minute: null, segmentKey: null };
+    slWaypoints.push(wp);
+
+    var list = document.getElementById("sl-waypoints-list");
+    var row = document.createElement("div");
+    row.className = "waypoint-row";
+    row.dataset.key = String(key);
+
+    var lbl = document.createElement("label");
+    lbl.textContent = "Via";
+    row.appendChild(lbl);
+
+    var sw = document.createElement("div");
+    sw.className = "search-wrapper";
+    var input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Search for a track...";
+    input.autocomplete = "off";
+    var results = document.createElement("div");
+    results.className = "search-results";
+    sw.appendChild(input);
+    sw.appendChild(results);
+    row.appendChild(sw);
+
+    // Position mode select
+    var posSelect = document.createElement("select");
+    var optSeq = document.createElement("option");
+    optSeq.value = "sequential";
+    optSeq.textContent = "Sequential";
+    var optTimed = document.createElement("option");
+    optTimed.value = "timed";
+    optTimed.textContent = "Timed";
+    posSelect.appendChild(optSeq);
+    posSelect.appendChild(optTimed);
+    row.appendChild(posSelect);
+
+    // Minute input (hidden by default)
+    var minuteInput = document.createElement("input");
+    minuteInput.type = "number";
+    minuteInput.min = "0";
+    minuteInput.step = "0.5";
+    minuteInput.placeholder = "minute";
+    minuteInput.style.display = "none";
+    row.appendChild(minuteInput);
+
+    posSelect.addEventListener("change", function () {
+      wp.positionMode = posSelect.value;
+      minuteInput.style.display = posSelect.value === "timed" ? "" : "none";
+    });
+    minuteInput.addEventListener("change", function () {
+      wp.minute = minuteInput.value !== "" ? parseFloat(minuteInput.value) : null;
+    });
+
+    // Segment key select
+    var segKeySpan = document.createElement("span");
+    segKeySpan.textContent = "Key for this segment";
+    row.appendChild(segKeySpan);
+
+    var segKeySelect = document.createElement("select");
+    var keyOptions = [
+      ["", "Any key"],
+      ["C major","C major"],["C# major","C# major"],["D major","D major"],
+      ["D# major","D# major"],["E major","E major"],["F major","F major"],
+      ["F# major","F# major"],["G major","G major"],["G# major","G# major"],
+      ["A major","A major"],["A# major","A# major"],["B major","B major"],
+      ["C minor","C minor"],["C# minor","C# minor"],["D minor","D minor"],
+      ["D# minor","D# minor"],["E minor","E minor"],["F minor","F minor"],
+      ["F# minor","F# minor"],["G minor","G minor"],["G# minor","G# minor"],
+      ["A minor","A minor"],["A# minor","A# minor"],["B minor","B minor"],
+    ];
+    keyOptions.forEach(function (pair) {
+      var opt = document.createElement("option");
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      segKeySelect.appendChild(opt);
+    });
+    segKeySelect.addEventListener("change", function () {
+      wp.segmentKey = segKeySelect.value || null;
+    });
+    row.appendChild(segKeySelect);
+
+    // Remove button
+    var removeBtn = document.createElement("button");
+    removeBtn.className = "waypoint-remove-btn";
+    removeBtn.title = "Remove";
+    removeBtn.textContent = "×";
+    removeBtn.addEventListener("click", function () {
+      var idx = slWaypoints.findIndex(function (w) { return w.key === key; });
+      if (idx !== -1) slWaypoints.splice(idx, 1);
+      row.remove();
+    });
+    row.appendChild(removeBtn);
+
+    list.appendChild(row);
+    wireAutocomplete(input, results, function (id) { wp.id = id; });
+    input.focus();
+  });
+
+  // Expose state so the generate-setlist-btn handler (defined below) can read it.
+  window._slState = {
+    getStartMode:  function () { return slStartMode; },
+    getEndMode:    function () { return slEndMode; },
+    getStartSongId: function () { return slStartSongId; },
+    getEndSongId:  function () { return slEndSongId; },
+    getWaypoints:  function () { return slWaypoints; },
+  };
+}());
+
+// =========================================================================
 // 8. Create Setlist
 // =========================================================================
 
@@ -1147,8 +1350,14 @@ document.getElementById("generate-setlist-btn").addEventListener("click", async 
   var minBpm = parseFloat(document.getElementById("sl-min-bpm").value);
   var maxBpm = parseFloat(document.getElementById("sl-max-bpm").value);
   var targetMin = parseFloat(document.getElementById("sl-target-duration").value) || 60;
-  var startingKey = document.getElementById("sl-starting-key").value || null;
   var setKey = document.getElementById("sl-set-key").value || null;
+
+  var slState = window._slState;
+  var slStartMode  = slState.getStartMode();
+  var slEndMode    = slState.getEndMode();
+  var slStartSongId = slState.getStartSongId();
+  var slEndSongId   = slState.getEndSongId();
+  var slWaypoints   = slState.getWaypoints();
 
   // Basic client-side validation
   if (!isNaN(minBpm) && !isNaN(maxBpm) && minBpm > maxBpm) {
@@ -1167,10 +1376,25 @@ document.getElementById("generate-setlist-btn").addEventListener("click", async 
         min_bpm: isNaN(minBpm) ? 0 : minBpm,
         max_bpm: isNaN(maxBpm) ? 999 : maxBpm,
         target_duration_min: targetMin,
-        starting_key: startingKey,
+        starting_key:  slStartMode === "key"  ? (document.getElementById("sl-starting-key").value || null) : null,
+        starting_song: slStartMode === "song" ? (slStartSongId || null) : null,
+        ending_key:    slEndMode   === "key"  ? (document.getElementById("sl-ending-key").value   || null) : null,
+        ending_song:   slEndMode   === "song" ? (slEndSongId   || null) : null,
         set_key: setKey,
         allowed_types: getAllowedTypes(),
         excluded_dirs: getExcludedDirs(),
+        waypoints: (function () {
+          if (!document.getElementById("sl-waypoints-enabled").checked) return null;
+          var filled = slWaypoints.filter(function (w) { return w.id; });
+          if (!filled.length) return null;
+          return filled.map(function (w) {
+            return {
+              song: w.id,
+              minute: w.positionMode === "timed" ? (w.minute || null) : null,
+              segment_key: w.segmentKey || null,
+            };
+          });
+        }()),
       }),
     });
     var result = await resp.json();
