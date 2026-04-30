@@ -13,10 +13,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
-
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 
 class AudioAnalysis(NamedTuple):
