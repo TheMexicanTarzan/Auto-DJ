@@ -863,20 +863,7 @@ function populateSearch() {
   setupAutocomplete("details-search", "details-results", function (id) {
     loadNodeDetails(id);
   });
-
-  // Setlist start/end song search — wired here so songList is already populated.
-  if (window._slState) {
-    wireAutocomplete(
-      document.getElementById("sl-start-song-input"),
-      document.getElementById("sl-start-song-results"),
-      window._slState.onStartSelect
-    );
-    wireAutocomplete(
-      document.getElementById("sl-end-song-input"),
-      document.getElementById("sl-end-song-results"),
-      window._slState.onEndSelect
-    );
-  }
+  initSetlistControls();
 }
 
 /**
@@ -1129,14 +1116,45 @@ function clearHighlights() {
 // 8a. Create Setlist — starting/ending mode toggles, conflict detection, waypoints
 // =========================================================================
 
-(function () {
-  var slStartMode = "key";
-  var slEndMode   = "none";
-  var slStartSongId = null;
-  var slEndSongId   = null;
-  var slWaypoints   = [];
-  var slWaypointCounter = 0;
+// Setlist UI state — plain globals, initialised by initSetlistControls().
+var slStartMode     = "key";
+var slEndMode       = "none";
+var slStartSongId   = null;
+var slEndSongId     = null;
+var slWaypoints     = [];
+var slWaypointCounter = 0;
 
+function checkSetlistConflict() {
+  var msgEl  = document.getElementById("sl-conflict-msg");
+  var setKey = document.getElementById("sl-set-key").value;
+  var parts  = [];
+
+  if (slStartMode === "song" && slStartSongId && setKey) {
+    var songKey = graphInstance && graphInstance.hasNode(slStartSongId)
+      ? graphInstance.getNodeAttribute(slStartSongId, "key") : null;
+    if (songKey && songKey !== setKey) {
+      parts.push("starting song (" + songKey + ") vs set key (" + setKey + ")");
+    }
+  }
+  if (slEndMode === "song" && slEndSongId && setKey) {
+    var endKey = graphInstance && graphInstance.hasNode(slEndSongId)
+      ? graphInstance.getNodeAttribute(slEndSongId, "key") : null;
+    if (endKey && endKey !== setKey) {
+      parts.push("ending song (" + endKey + ") vs set key (" + setKey + ")");
+    }
+  }
+
+  if (parts.length > 0) {
+    msgEl.textContent = "Key conflict: " + parts.join("; ")
+      + ". The set key constraint will be relaxed for the pinned track(s).";
+    msgEl.style.display = "";
+  } else {
+    msgEl.style.display = "none";
+  }
+}
+
+/** Called once from populateSearch() after the graph and songList are ready. */
+function initSetlistControls() {
   // --- starting mode toggle ---
   document.getElementById("sl-start-mode-toggle").querySelectorAll(".mode-btn").forEach(function (btn) {
     btn.addEventListener("click", function () {
@@ -1167,40 +1185,22 @@ function clearHighlights() {
     });
   });
 
-  // --- conflict detection ---
-  function checkSetlistConflict() {
-    var msgEl = document.getElementById("sl-conflict-msg");
-    var setKey = document.getElementById("sl-set-key").value;
-    var parts = [];
+  // --- start / end song autocomplete ---
+  wireAutocomplete(
+    document.getElementById("sl-start-song-input"),
+    document.getElementById("sl-start-song-results"),
+    function (id) { slStartSongId = id; checkSetlistConflict(); }
+  );
+  wireAutocomplete(
+    document.getElementById("sl-end-song-input"),
+    document.getElementById("sl-end-song-results"),
+    function (id) { slEndSongId = id; checkSetlistConflict(); }
+  );
 
-    if (slStartMode === "song" && slStartSongId && setKey) {
-      var songKey = graphInstance && graphInstance.hasNode(slStartSongId)
-        ? graphInstance.getNodeAttribute(slStartSongId, "key") : null;
-      if (songKey && songKey !== setKey) {
-        parts.push("starting song (" + songKey + ") vs set key (" + setKey + ")");
-      }
-    }
-    if (slEndMode === "song" && slEndSongId && setKey) {
-      var endKey = graphInstance && graphInstance.hasNode(slEndSongId)
-        ? graphInstance.getNodeAttribute(slEndSongId, "key") : null;
-      if (endKey && endKey !== setKey) {
-        parts.push("ending song (" + endKey + ") vs set key (" + setKey + ")");
-      }
-    }
-
-    if (parts.length > 0) {
-      msgEl.textContent = "Key conflict: " + parts.join("; ")
-        + ". The set key constraint will be relaxed for the pinned track(s).";
-      msgEl.style.display = "";
-    } else {
-      msgEl.style.display = "none";
-    }
-  }
-
-  // Call checkSetlistConflict when set key changes.
+  // --- set key conflict check ---
   document.getElementById("sl-set-key").addEventListener("change", checkSetlistConflict);
 
-  // --- waypoints checkbox ---
+  // --- waypoints toggle ---
   document.getElementById("sl-waypoints-enabled").addEventListener("change", function () {
     document.getElementById("sl-waypoints-panel").style.display = this.checked ? "" : "none";
   });
@@ -1232,7 +1232,6 @@ function clearHighlights() {
     sw.appendChild(results);
     row.appendChild(sw);
 
-    // Controls sub-row: position mode, minute, segment key
     var controls = document.createElement("div");
     controls.className = "waypoint-controls";
 
@@ -1293,7 +1292,6 @@ function clearHighlights() {
 
     row.appendChild(controls);
 
-    // Remove button
     var removeBtn = document.createElement("button");
     removeBtn.className = "waypoint-remove-btn";
     removeBtn.title = "Remove";
@@ -1309,19 +1307,7 @@ function clearHighlights() {
     wireAutocomplete(input, results, function (id) { wp.id = id; });
     input.focus();
   });
-
-  // Expose state and onSelect callbacks so populateSearch() can wire autocomplete
-  // after the graph/song list has loaded (same lifecycle as other search inputs).
-  window._slState = {
-    getStartMode:   function () { return slStartMode; },
-    getEndMode:     function () { return slEndMode; },
-    getStartSongId: function () { return slStartSongId; },
-    getEndSongId:   function () { return slEndSongId; },
-    getWaypoints:   function () { return slWaypoints; },
-    onStartSelect:  function (id) { slStartSongId = id; checkSetlistConflict(); },
-    onEndSelect:    function (id) { slEndSongId = id;   checkSetlistConflict(); },
-  };
-}());
+}
 
 // =========================================================================
 // 8. Create Setlist
@@ -1361,12 +1347,6 @@ document.getElementById("generate-setlist-btn").addEventListener("click", async 
   var targetMin = parseFloat(document.getElementById("sl-target-duration").value) || 60;
   var setKey = document.getElementById("sl-set-key").value || null;
 
-  var slState = window._slState;
-  var slStartMode  = slState.getStartMode();
-  var slEndMode    = slState.getEndMode();
-  var slStartSongId = slState.getStartSongId();
-  var slEndSongId   = slState.getEndSongId();
-  var slWaypoints   = slState.getWaypoints();
 
   // Basic client-side validation
   if (!isNaN(minBpm) && !isNaN(maxBpm) && minBpm > maxBpm) {
