@@ -245,40 +245,6 @@ def _start_loader_thread() -> None:
 _DEFAULT_TOP_K = 10
 
 
-@app.get("/api/debug/graph-state")
-def api_debug_graph_state():
-    """Diagnostic endpoint — exposes internal graph state for troubleshooting."""
-    with _graph_lock:
-        state = dict(_graph_state)
-    graph = state.get("graph")
-    orig  = state.get("original_graph")
-    umap  = state.get("umap_graph")
-    return _orjson_response({
-        "ready":            state.get("ready"),
-        "mode":             state.get("mode"),
-        "error":            state.get("error"),
-        "cache_path":       str(CACHE_PATH),
-        "cache_exists":     CACHE_PATH.exists(),
-        "cache_size_mb":    round(CACHE_PATH.stat().st_size / 1_048_576, 2) if CACHE_PATH.exists() else None,
-        "songs_directory":  str(SONGS_DIRECTORY),
-        "graph": {
-            "num_nodes":        graph.num_nodes if graph else None,
-            "num_edges":        graph.num_edges if graph else None,
-            "songs_in_dict":    len(graph._songs) if graph else None,
-            "cache_is_none":    graph._sorted_songs_cache is None if graph else None,
-            "cache_len":        len(graph._sorted_songs_cache) if (graph and graph._sorted_songs_cache is not None) else None,
-        },
-        "original_graph": {
-            "num_nodes":        orig.num_nodes if orig else None,
-            "songs_in_dict":    len(orig._songs) if orig else None,
-        } if orig else None,
-        "umap_graph": {
-            "num_nodes":        umap.num_nodes if umap else None,
-            "songs_in_dict":    len(umap._songs) if umap else None,
-        } if umap else None,
-    })
-
-
 def _get_graph() -> DJGraph | None:
     """Return the graph if ready, else None."""
     with _graph_lock:
@@ -380,6 +346,40 @@ app = FastAPI(title="Auto-DJ Mix Pathfinder", lifespan=_lifespan)
 # ---------------------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/api/debug/graph-state")
+def api_debug_graph_state():
+    """Diagnostic endpoint — exposes internal graph state for troubleshooting."""
+    with _graph_lock:
+        state = dict(_graph_state)
+    graph = state.get("graph")
+    orig  = state.get("original_graph")
+    umap  = state.get("umap_graph")
+    return _orjson_response({
+        "ready":            state.get("ready"),
+        "mode":             state.get("mode"),
+        "error":            state.get("error"),
+        "cache_path":       str(CACHE_PATH),
+        "cache_exists":     CACHE_PATH.exists(),
+        "cache_size_mb":    round(CACHE_PATH.stat().st_size / 1_048_576, 2) if CACHE_PATH.exists() else None,
+        "songs_directory":  str(SONGS_DIRECTORY),
+        "graph": {
+            "num_nodes":        graph.num_nodes if graph else None,
+            "num_edges":        graph.num_edges if graph else None,
+            "songs_in_dict":    len(graph._songs) if graph else None,
+            "cache_is_none":    graph._sorted_songs_cache is None if graph else None,
+            "cache_len":        len(graph._sorted_songs_cache) if (graph and graph._sorted_songs_cache is not None) else None,
+        },
+        "original_graph": {
+            "num_nodes":        orig.num_nodes if orig else None,
+            "songs_in_dict":    len(orig._songs) if orig else None,
+        } if orig else None,
+        "umap_graph": {
+            "num_nodes":        umap.num_nodes if umap else None,
+            "songs_in_dict":    len(umap._songs) if umap else None,
+        } if umap else None,
+    })
+
 
 @app.get("/api/status")
 def api_status():
