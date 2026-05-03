@@ -23,12 +23,18 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import os
 import orjson
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# Random nonce included in every ETag so that a server restart always
+# produces cache misses — prevents browsers from serving stale data
+# (e.g. an empty song list) cached from a previous session.
+_STARTUP_NONCE = os.urandom(8).hex()
 
 from collections import defaultdict
 
@@ -279,10 +285,11 @@ def _get_graph() -> DJGraph | None:
         return _graph_state["graph"] if _graph_state["ready"] else None
 
 
-def _get_graph_version() -> int:
-    """Return the current graph version counter."""
+def _get_etag() -> str:
+    """Return an ETag string that changes on every graph mutation AND on every
+    server restart, preventing browsers from serving stale cached responses."""
     with _graph_lock:
-        return _graph_state["version"]
+        return f'W/"{_STARTUP_NONCE}-{_graph_state["version"]}"'
 
 
 def _get_progress() -> dict:
@@ -387,7 +394,7 @@ def api_graph(request: Request):
     if graph is None:
         return _orjson_response({"error": "Graph not ready"}, status_code=503)
 
-    etag = f'W/"{_get_graph_version()}"'
+    etag = _get_etag()
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304)
 
@@ -455,7 +462,7 @@ def api_songs(request: Request):
     if graph is None:
         return _orjson_response({"error": "Graph not ready"}, status_code=503)
 
-    etag = f'W/"{_get_graph_version()}"'
+    etag = _get_etag()
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304)
 
