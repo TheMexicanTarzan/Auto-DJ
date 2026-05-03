@@ -190,9 +190,24 @@ def _load_graph_background() -> None:
         # --- Apply all mutations in a tight block ---
         sync_changed = False
         if removed_hashes:
-            logger.info("Removing %d deleted song(s)...", len(removed_hashes))
-            graph.remove_songs(removed_hashes)
-            sync_changed = True
+            known = graph.known_hashes
+            # Safety guard: if every known song would be removed, the songs
+            # directory is probably temporarily inaccessible (e.g. a network
+            # drive, WSL mount, or path change).  Skip removal to protect the
+            # cache rather than silently wiping the library.
+            if known and removed_hashes >= known:
+                logger.warning(
+                    "Incremental sync would remove ALL %d song(s) — "
+                    "skipping removal to protect cache. "
+                    "If the library was intentionally cleared, delete the "
+                    "cache file '%s' and restart.",
+                    len(removed_hashes),
+                    CACHE_PATH,
+                )
+            else:
+                logger.info("Removing %d deleted song(s)...", len(removed_hashes))
+                graph.remove_songs(removed_hashes)
+                sync_changed = True
 
         if new_songs:
             graph.add_songs_incremental(new_songs)

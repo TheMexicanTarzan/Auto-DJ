@@ -561,6 +561,7 @@ class DJGraph:
                 "embedding": song.embedding,
                 "content_hash": song.content_hash,
                 "fingerprint": song.fingerprint,
+                "duration_sec": song.duration_sec,
             })
 
         has_edge_type = "edge_type" in self.graph.es.attributes() if self.graph.ecount() > 0 else False
