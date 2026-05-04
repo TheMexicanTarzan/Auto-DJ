@@ -1089,56 +1089,85 @@ class DJGraph:
         # Waypoints mode: generate each segment independently.
         # ------------------------------------------------------------------
         if waypoints:
-            # Validate all waypoint songs.
+            # Validate all waypoint songs (creation order is preserved).
             for wp_dict in waypoints:
-                wp_path = wp_dict["song"]
-                if wp_path not in self._songs:
-                    raise ValueError(f"Waypoint song not found: {wp_path}")
+                if wp_dict["song"] not in self._songs:
+                    raise ValueError(f"Waypoint song not found: {wp_dict['song']}")
 
-            time_pinned = sorted(
-                [w for w in waypoints if w.get("minute") is not None],
-                key=lambda w: w["minute"],
-            )
-            sequential = [w for w in waypoints if w.get("minute") is None]
-
-            # Build segment list: (duration_sec, set_key_override, waypoint_song | None)
-            segments: list[tuple[float, str | None, Song | None]] = []
-            prev_boundary_sec = 0.0
-            for wp_dict in time_pinned:
-                boundary_sec = wp_dict["minute"] * 60.0
-                seg_dur = max(0.0, boundary_sec - prev_boundary_sec)
-                sk = wp_dict.get("segment_key") or set_key
-                segments.append((seg_dur, sk, self._songs[wp_dict["song"]]))
-                prev_boundary_sec = boundary_sec
-
-            pinned_total = prev_boundary_sec
-            remaining_sec = max(0.0, target_sec - pinned_total)
-            n_tail_segs = len(sequential) + 1
-            seg_share = remaining_sec / n_tail_segs if n_tail_segs > 0 else remaining_sec
-            for wp_dict in sequential:
-                sk = wp_dict.get("segment_key") or set_key
-                segments.append((seg_share, sk, self._songs[wp_dict["song"]]))
-            segments.append((seg_share, set_key, None))  # tail segment
-
-            # Generate each segment.
             full_setlist: list[Song] = []
-            forced: Song | None = pinned_start
-            for seg_idx, (seg_dur, seg_sk, junction_song) in enumerate(segments):
-                seg_songs = _greedy_segment(forced, seg_dur, seg_sk)
-                if seg_idx == 0:
-                    full_setlist.extend(seg_songs)
-                else:
-                    # Skip first song if it duplicates the junction.
-                    start_offset = 1 if (seg_songs and full_setlist and
-                                         seg_songs[0].file_path == full_setlist[-1].file_path) else 0
-                    full_setlist.extend(seg_songs[start_offset:])
 
-                if junction_song is not None:
-                    if not full_setlist or full_setlist[-1].file_path != junction_song.file_path:
-                        full_setlist.append(junction_song)
-                    forced = junction_song
-                elif seg_songs:
-                    forced = seg_songs[-1]
+            # Pin or freely pick the opening song.
+            current: Song = (
+                pinned_start if pinned_start is not None
+                else random.choice(start_pool)
+            )
+            full_setlist.append(current)
+            current_time: float = song_duration(current)
+
+            # Process every waypoint in creation order.
+            for wp_dict in waypoints:
+                wp_song = self._songs[wp_dict["song"]]
+                seg_key = wp_dict.get("segment_key") or set_key
+
+                if wp_dict.get("minute") is not None:
+                    # ── TIMED waypoint ──────────────────────────────────────
+                    # Greedy-fill up to (target_minute − duration_of_waypoint),
+                    # then pin the waypoint song at the declared minute mark.
+                    target_time_sec = wp_dict["minute"] * 60.0
+                    fill_dur = max(
+                        0.0,
+                        target_time_sec - current_time - song_duration(wp_song),
+                    )
+                    if fill_dur > 0:
+                        seg = _greedy_segment(current, fill_dur, seg_key)
+                        start_i = (
+                            1 if (seg and seg[0].file_path == current.file_path)
+                            else 0
+                        )
+                        full_setlist.extend(seg[start_i:])
+                        current = seg[-1] if seg else current
+
+                    # Pin the waypoint song.
+                    if not full_setlist or full_setlist[-1].file_path != wp_song.file_path:
+                        full_setlist.append(wp_song)
+                    current = wp_song
+                    # Snap running time to the declared minute mark.
+                    current_time = target_time_sec
+
+                else:
+                    # ── SEQUENTIAL waypoint ─────────────────────────────────
+                    # Use Dijkstra (same logic as the Pathfinding tab) for a
+                    # smooth minimum-cost route.  This naturally avoids large
+                    # BPM jumps because they carry high edge weight.
+                    try:
+                        path, _ = self.get_shortest_path(
+                            current.file_path,
+                            wp_song.file_path,
+                            allowed_types=allowed_types,
+                            excluded_dirs=excluded_dirs,
+                            songs_directory=songs_directory,
+                        )
+                        # path[0] == current, already in the setlist.
+                        for s in path[1:]:
+                            full_setlist.append(s)
+                            current_time += song_duration(s)
+                    except (KeyError, NoPathError):
+                        # No graph path — jump directly to the waypoint.
+                        if not full_setlist or full_setlist[-1].file_path != wp_song.file_path:
+                            full_setlist.append(wp_song)
+                            current_time += song_duration(wp_song)
+
+                    current = wp_song
+
+            # Greedy-fill any remaining time to reach the target duration.
+            remaining = max(0.0, target_sec - current_time)
+            if remaining > 0:
+                tail = _greedy_segment(current, remaining, set_key, effective_ending_key)
+                start_i = (
+                    1 if (tail and tail[0].file_path == current.file_path)
+                    else 0
+                )
+                full_setlist.extend(tail[start_i:])
 
             if pinned_end is not None:
                 if not full_setlist or full_setlist[-1].file_path != pinned_end.file_path:
