@@ -286,12 +286,17 @@ function updateHeaderStats(graphData) {
   headerStats.textContent = parts.join(" | ");
 }
 
+/** Convert a path to a canonical forward-slash form, mapping WSL /mnt/X/ → X:/ */
+function canonicalPath(p) {
+  var s = p.replace(/\\/g, "/").replace(/\/+$/, "");
+  return s.replace(/^\/mnt\/([a-zA-Z])\//, function (_, d) { return d.toUpperCase() + ":/"; });
+}
+
 /** Compute the relative directory of a node id given the base path. */
 function nodeDirectory(nodeId, base) {
   if (!base) return ".";
-  // Normalize to forward slashes so Windows paths work correctly.
-  var normId = nodeId.replace(/\\/g, "/");
-  var normBase = base.replace(/\\/g, "/").replace(/\/+$/, "");
+  var normId = canonicalPath(nodeId);
+  var normBase = canonicalPath(base);
   var rel = normId;
   // Case-insensitive prefix match (Windows drives can differ in case).
   if (normId.toLowerCase().indexOf(normBase.toLowerCase()) === 0) {

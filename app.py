@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import os
+import re
 import orjson
 import uvicorn
 from fastapi import FastAPI, Request
@@ -280,6 +281,22 @@ def _orjson_response(data: object, status_code: int = 200) -> Response:
     )
 
 
+_WSL_RE = re.compile(r"^/mnt/([a-zA-Z])/")
+
+def _canonical_path(path_str: str) -> str:
+    """Return a forward-slash path string in a canonical form.
+
+    Converts WSL-style paths (/mnt/c/...) to Windows-style (C:/...) so that
+    paths scanned under WSL can be compared with a Windows SONGS_DIRECTORY,
+    and vice-versa.
+    """
+    s = path_str.replace("\\", "/")
+    m = _WSL_RE.match(s)
+    if m:
+        s = m.group(1).upper() + ":/" + s[m.end():]
+    return s.rstrip("/")
+
+
 def _build_directory_tree(graph: DJGraph) -> dict:
     """Build a nested directory tree from song file paths.
 
@@ -289,18 +306,18 @@ def _build_directory_tree(graph: DJGraph) -> dict:
     Each leaf directory (one that directly contains songs) also has a
     ``"count"`` key with the number of songs it holds.
     """
-    # Normalise base to forward-slash string without trailing separator.
-    # Lower-case for comparison so this works on case-insensitive FSes (Windows)
-    # even when Python < 3.12 makes Path.relative_to() case-sensitive.
-    base_str = str(Path(SONGS_DIRECTORY).resolve()).replace("\\", "/").rstrip("/")
+    # Canonical base: forward slashes, WSL /mnt/X/ → X:/, no trailing slash.
+    # Lower-cased separately for case-insensitive comparison (Windows).
+    base_str = _canonical_path(str(Path(SONGS_DIRECTORY).resolve()))
     base_lower = base_str.lower()
     dir_counts: dict[str, int] = defaultdict(int)
 
     for song in graph.songs:
-        fp_norm = str(Path(song.file_path).resolve()).replace("\\", "/")
+        # Use the stored path string directly — do NOT call resolve() because
+        # a WSL path like /mnt/c/... would be mis-resolved on Windows.
+        fp_norm = _canonical_path(song.file_path)
         fp_lower = fp_norm.lower()
         if fp_lower.startswith(base_lower + "/"):
-            # Slice off base (same byte-length regardless of case)
             rel_str = fp_norm[len(base_str) + 1:]
             parts = rel_str.split("/")
             parent = "/".join(parts[:-1]) if len(parts) > 1 else "."
