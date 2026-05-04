@@ -1217,11 +1217,26 @@ class DJGraph:
                 total += song_duration(next_song)
                 current = next_song
 
-            # Append pinned ending song if needed.
+            # Bridge to pinned ending song via Dijkstra — same logic as
+            # sequential waypoints, guarantees a connected path with no
+            # abrupt BPM jumps (large BPM jumps carry high edge cost).
             if pinned_end is not None:
                 if not setlist or setlist[-1].file_path != pinned_end.file_path:
-                    if pinned_end.file_path not in visited:
+                    try:
+                        bridge, _ = self.get_shortest_path(
+                            current.file_path,
+                            pinned_end.file_path,
+                            allowed_types=allowed_types,
+                            excluded_dirs=excluded_dirs,
+                            songs_directory=songs_directory,
+                        )
+                        for s in bridge[1:]:
+                            setlist.append(s)
+                            total += song_duration(s)
+                    except (KeyError, NoPathError):
                         setlist.append(pinned_end)
+                        total += song_duration(pinned_end)
+                return setlist  # pinned_end reached — no need to retry
 
             if total >= target_sec:
                 return setlist
