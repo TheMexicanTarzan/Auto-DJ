@@ -1559,9 +1559,11 @@ function buildSetlistFlow(pathNodes) {
 /** Fetch neighbors and populate the picker panel. */
 async function populateSetlistPicker(pickerEl, nodeId, index) {
   try {
+    var types = getAllowedTypes();
+    var typesParam = types.length > 0 && types.length < 3 ? "&types=" + types.join(",") : "";
     var excluded = getExcludedDirs();
     var dirsParam = excluded ? "&dirs=" + excluded.map(encodeURIComponent).join(",") : "";
-    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId) + "?k=8" + dirsParam);
+    var resp = await fetch("/api/neighbors/" + encodeURIComponent(nodeId) + "?k=8" + typesParam + dirsParam);
     var data = await resp.json();
 
     if (data.error || !data.neighbors || data.neighbors.length === 0) {

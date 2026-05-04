@@ -298,7 +298,7 @@ def _build_directory_tree(graph: DJGraph) -> dict:
         except ValueError:
             # Song outside SONGS_DIRECTORY — put in root
             rel = Path(Path(song.file_path).name)
-        parent = str(rel.parent) if rel.parent != Path(".") else "."
+        parent = str(rel.parent).replace("\\", "/") if rel.parent != Path(".") else "."
         dir_counts[parent] += 1
 
     # Build nested tree from flat directory paths
