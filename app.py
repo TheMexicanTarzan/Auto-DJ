@@ -289,16 +289,23 @@ def _build_directory_tree(graph: DJGraph) -> dict:
     Each leaf directory (one that directly contains songs) also has a
     ``"count"`` key with the number of songs it holds.
     """
-    base = Path(SONGS_DIRECTORY).resolve()
+    # Normalise base to forward-slash string without trailing separator.
+    # Lower-case for comparison so this works on case-insensitive FSes (Windows)
+    # even when Python < 3.12 makes Path.relative_to() case-sensitive.
+    base_str = str(Path(SONGS_DIRECTORY).resolve()).replace("\\", "/").rstrip("/")
+    base_lower = base_str.lower()
     dir_counts: dict[str, int] = defaultdict(int)
 
     for song in graph.songs:
-        try:
-            rel = Path(song.file_path).resolve().relative_to(base)
-        except ValueError:
-            # Song outside SONGS_DIRECTORY — put in root
-            rel = Path(Path(song.file_path).name)
-        parent = str(rel.parent).replace("\\", "/") if rel.parent != Path(".") else "."
+        fp_norm = str(Path(song.file_path).resolve()).replace("\\", "/")
+        fp_lower = fp_norm.lower()
+        if fp_lower.startswith(base_lower + "/"):
+            # Slice off base (same byte-length regardless of case)
+            rel_str = fp_norm[len(base_str) + 1:]
+            parts = rel_str.split("/")
+            parent = "/".join(parts[:-1]) if len(parts) > 1 else "."
+        else:
+            parent = "."
         dir_counts[parent] += 1
 
     # Build nested tree from flat directory paths

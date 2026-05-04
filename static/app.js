@@ -289,10 +289,13 @@ function updateHeaderStats(graphData) {
 /** Compute the relative directory of a node id given the base path. */
 function nodeDirectory(nodeId, base) {
   if (!base) return ".";
-  // Strip base prefix + trailing separator
-  var rel = nodeId;
-  if (nodeId.indexOf(base) === 0) {
-    rel = nodeId.slice(base.length);
+  // Normalize to forward slashes so Windows paths work correctly.
+  var normId = nodeId.replace(/\\/g, "/");
+  var normBase = base.replace(/\\/g, "/").replace(/\/+$/, "");
+  var rel = normId;
+  // Case-insensitive prefix match (Windows drives can differ in case).
+  if (normId.toLowerCase().indexOf(normBase.toLowerCase()) === 0) {
+    rel = normId.slice(normBase.length);
     if (rel.charAt(0) === "/") rel = rel.slice(1);
   }
   var lastSlash = rel.lastIndexOf("/");
