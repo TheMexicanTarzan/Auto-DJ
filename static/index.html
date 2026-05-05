@@ -296,9 +296,11 @@
           <div class="settings-section-title">UMAP Semantic Reduction</div>
 
           <!-- Mode toggle -->
-          <div class="mode-toggle">
+          <div class="mode-toggle" id="umap-mode-toggle">
             <button class="mode-btn active" id="mode-original-btn" data-mode="original">Original</button>
-            <button class="mode-btn" id="mode-umap-btn" data-mode="umap">UMAP</button>
+            <select id="umap-version-select" disabled>
+              <option value="" disabled selected>No UMAP versions</option>
+            </select>
           </div>
           <p class="output-msg" id="umap-mode-msg">Active: original embeddings</p>
 

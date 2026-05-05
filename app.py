@@ -39,7 +39,7 @@ _STARTUP_NONCE = os.urandom(8).hex()
 
 from collections import defaultdict
 
-from src.config import CACHE_PATH, SETLISTS_DIRECTORY, SONGS_DIRECTORY, UMAP_CACHE_PATH, _LEGACY_JSON_CACHE
+from src.config import CACHE_PATH, SETLISTS_DIRECTORY, SONGS_DIRECTORY, umap_cache_path, _LEGACY_JSON_CACHE
 from src.graph import DJGraph, NoPathError
 from src.setlist_saver import save_setlist
 from src.utils import analyse_new_songs, discover_changes, scan_directory
@@ -63,8 +63,8 @@ _graph_lock = threading.Lock()
 _graph_state: dict = {
     "graph": None,           # DJGraph | None — currently active graph
     "original_graph": None,  # DJGraph | None — original-embedding graph
-    "umap_graph": None,      # DJGraph | None — UMAP-reduced graph (if fitted)
-    "mode": "original",      # "original" | "umap"
+    "umap_graphs": {},       # dict[str, DJGraph] — versioned UMAP graphs
+    "mode": "original",      # "original" | UMAP version key (e.g. "UMAP_15_0.1_32")
     "ready": False,
     "progress": 0,           # 0-100
     "total": 0,
@@ -149,20 +149,25 @@ def _load_graph_background() -> None:
             _graph_state["progress"] = 100
             _graph_state["version"] += 1
 
-        # Opportunistically load the UMAP cache if it already exists from a
-        # previous session — avoids making the user re-fit on every restart.
-        if UMAP_CACHE_PATH.exists():
+        # Opportunistically load all UMAP caches from previous sessions —
+        # avoids making the user re-fit on every restart.
+        import glob
+        umap_pattern = str(CACHE_PATH.parent / "UMAP_*.pkl")
+        for umap_file in glob.glob(umap_pattern):
+            umap_path = Path(umap_file)
+            version_key = umap_path.stem  # e.g. "UMAP_15_0.1_32"
             try:
-                umap_graph = DJGraph.load_from_pickle(UMAP_CACHE_PATH)
+                umap_graph = DJGraph.load_from_pickle(umap_path)
                 with _graph_lock:
-                    _graph_state["umap_graph"] = umap_graph
+                    _graph_state["umap_graphs"][version_key] = umap_graph
                 logger.info(
-                    "UMAP cache loaded: %d node(s), %d edge(s).",
+                    "UMAP cache '%s' loaded: %d node(s), %d edge(s).",
+                    version_key,
                     umap_graph.num_nodes,
                     umap_graph.num_edges,
                 )
             except Exception:
-                logger.warning("Failed to load UMAP cache — will require re-fitting.")
+                logger.warning("Failed to load UMAP cache '%s' — skipping.", version_key)
 
         logger.info(
             "Graph ready: %d node(s), %d edge(s).",
@@ -378,7 +383,7 @@ def api_debug_graph_state():
         state = dict(_graph_state)
     graph = state.get("graph")
     orig  = state.get("original_graph")
-    umap  = state.get("umap_graph")
+    umap_graphs = state.get("umap_graphs", {})
     return _orjson_response({
         "ready":            state.get("ready"),
         "mode":             state.get("mode"),
@@ -398,10 +403,13 @@ def api_debug_graph_state():
             "num_nodes":        orig.num_nodes if orig else None,
             "songs_in_dict":    len(orig._songs) if orig else None,
         } if orig else None,
-        "umap_graph": {
-            "num_nodes":        umap.num_nodes if umap else None,
-            "songs_in_dict":    len(umap._songs) if umap else None,
-        } if umap else None,
+        "umap_graphs": {
+            key: {
+                "num_nodes":        g.num_nodes if g else None,
+                "songs_in_dict":    len(g._songs) if g else None,
+            }
+            for key, g in umap_graphs.items()
+        },
     })
 
 
@@ -799,7 +807,10 @@ def api_recalculate(req: RecalculateRequest):
         active_mode = _graph_state.get("mode", "original")
 
     # Persist to the cache that matches the currently active graph.
-    cache = UMAP_CACHE_PATH if active_mode == "umap" else CACHE_PATH
+    if active_mode != "original" and active_mode.startswith("UMAP_"):
+        cache = CACHE_PATH.parent / f"{active_mode}.pkl"
+    else:
+        cache = CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     graph.save_to_pickle(cache)
 
@@ -843,15 +854,21 @@ def api_umap_fit(req: UmapFitRequest):
         logger.exception("UMAP fit failed.")
         return _orjson_response({"error": str(exc)}, status_code=500)
 
-    UMAP_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    umap_graph.save_to_pickle(UMAP_CACHE_PATH)
+    version_key = f"UMAP_{req.n_neighbors}_{req.min_dist}_{req.n_components}"
+    cache_file = CACHE_PATH.parent / f"{version_key}.pkl"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    umap_graph.save_to_pickle(cache_file)
 
     with _graph_lock:
-        _graph_state["umap_graph"] = umap_graph
+        _graph_state["umap_graphs"][version_key] = umap_graph
+        _graph_state["graph"] = umap_graph
+        _graph_state["mode"] = version_key
+        _graph_state["version"] += 1
 
     return _orjson_response({
         "num_edges": umap_graph.num_edges,
         "message": "UMAP graph built successfully.",
+        "version_key": version_key,
     })
 
 
@@ -862,18 +879,16 @@ class SwitchModeRequest(BaseModel):
 @app.post("/api/umap/switch")
 def api_umap_switch(req: SwitchModeRequest):
     """Switch the active graph between original and UMAP-reduced embeddings."""
-    if req.mode not in ("original", "umap"):
-        return _orjson_response({"error": "mode must be 'original' or 'umap'"}, status_code=400)
-
     with _graph_lock:
-        if req.mode == "umap":
-            if _graph_state["umap_graph"] is None:
-                return _orjson_response(
-                    {"error": "UMAP graph not available. Fit it first."}, status_code=400
-                )
-            _graph_state["graph"] = _graph_state["umap_graph"]
-        else:
+        if req.mode == "original":
             _graph_state["graph"] = _graph_state["original_graph"]
+        elif req.mode in _graph_state["umap_graphs"]:
+            _graph_state["graph"] = _graph_state["umap_graphs"][req.mode]
+        else:
+            return _orjson_response(
+                {"error": f"Unknown mode '{req.mode}'. Must be 'original' or a valid UMAP version key."},
+                status_code=400,
+            )
         _graph_state["mode"] = req.mode
         _graph_state["version"] += 1
 
@@ -882,14 +897,14 @@ def api_umap_switch(req: SwitchModeRequest):
 
 @app.get("/api/umap/status")
 def api_umap_status():
-    """Return the current embedding mode and whether a UMAP graph is available."""
+    """Return the current embedding mode and list of available UMAP versions."""
     with _graph_lock:
         mode = _graph_state.get("mode", "original")
-        umap_available = _graph_state["umap_graph"] is not None
+        available_versions = list(_graph_state["umap_graphs"].keys())
 
     return _orjson_response({
         "mode": mode,
-        "umap_available": umap_available,
+        "available_versions": available_versions,
     })
 
 

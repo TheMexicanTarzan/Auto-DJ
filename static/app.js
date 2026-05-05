@@ -857,6 +857,41 @@ function updateFilteredStats() {
     visibleNodes + " of " + total + " tracks | " + visibleEdges + " transitions (filtered)";
 }
 
+/**
+ * Compute the Levenshtein edit distance between two strings.
+ * Uses a single-row DP approach with early termination for performance.
+ */
+function levenshteinDistance(a, b) {
+  if (a === b) return 0;
+  var la = a.length, lb = b.length;
+  if (la === 0) return lb;
+  if (lb === 0) return la;
+
+  // Ensure a is the shorter string for space efficiency
+  if (la > lb) {
+    var tmp = a; a = b; b = tmp;
+    var tl = la; la = lb; lb = tl;
+  }
+
+  var prev = new Array(la + 1);
+  var curr = new Array(la + 1);
+  for (var i = 0; i <= la; i++) prev[i] = i;
+
+  for (var j = 1; j <= lb; j++) {
+    curr[0] = j;
+    for (var k = 1; k <= la; k++) {
+      var cost = a[k - 1] === b[j - 1] ? 0 : 1;
+      curr[k] = Math.min(
+        prev[k] + 1,     // deletion
+        curr[k - 1] + 1, // insertion
+        prev[k - 1] + cost // substitution
+      );
+    }
+    var t = prev; prev = curr; curr = t;
+  }
+  return prev[la];
+}
+
 // =========================================================================
 // 6. Song search / autocomplete
 // =========================================================================
@@ -898,7 +933,13 @@ function wireAutocomplete(inputEl, resultsEl, onSelect) {
       var searchList = filteredSongList || songList;
       var matches = searchList.filter(function (s) {
         return s._lower.indexOf(query) !== -1;
-      }).slice(0, 50);
+      });
+
+      // Sort by Levenshtein distance so closest matches appear first
+      matches.sort(function (a, b) {
+        return levenshteinDistance(query, a._lower) - levenshteinDistance(query, b._lower);
+      });
+      matches = matches.slice(0, 50);
 
       if (matches.length === 0) {
         resultsEl.innerHTML = "";
@@ -1705,6 +1746,98 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
   linkSliderAndInput("umap-min-dist",     "umap-min-dist-val",     2);
   linkSliderAndInput("umap-n-components", "umap-n-components-val", 0);
 
+  var originalBtn = document.getElementById("mode-original-btn");
+  var versionSelect = document.getElementById("umap-version-select");
+  var modeMsgEl = document.getElementById("umap-mode-msg");
+
+  /** Parse a version key like "UMAP_15_0.1_32" into a human-readable label. */
+  function versionLabel(key) {
+    // Expected format: UMAP_<n_neighbors>_<min_dist>_<n_components>
+    var parts = key.replace(/^UMAP_/, "").split("_");
+    if (parts.length === 3) {
+      return "UMAP (" + parts[0] + ", " + parts[1] + ", " + parts[2] + ")";
+    }
+    return key;
+  }
+
+  /** Populate the dropdown from a list of version keys. */
+  function populateVersionSelect(versions, activeMode) {
+    versionSelect.innerHTML = "";
+    if (versions.length === 0) {
+      var placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      placeholder.textContent = "No UMAP versions";
+      versionSelect.appendChild(placeholder);
+      versionSelect.disabled = true;
+    } else {
+      versions.forEach(function (key) {
+        var opt = document.createElement("option");
+        opt.value = key;
+        opt.textContent = versionLabel(key);
+        if (key === activeMode) opt.selected = true;
+        versionSelect.appendChild(opt);
+      });
+      versionSelect.disabled = false;
+    }
+  }
+
+  /** Update toggle appearance and status text to reflect the active mode. */
+  function applyMode(mode) {
+    if (mode === "original") {
+      originalBtn.classList.add("active");
+      versionSelect.classList.remove("active-select");
+      // Deselect dropdown
+      if (versionSelect.options.length > 0) {
+        versionSelect.selectedIndex = -1;
+      }
+      modeMsgEl.textContent = "Active: original embeddings";
+    } else {
+      originalBtn.classList.remove("active");
+      versionSelect.classList.add("active-select");
+      // Select the matching option
+      for (var i = 0; i < versionSelect.options.length; i++) {
+        if (versionSelect.options[i].value === mode) {
+          versionSelect.selectedIndex = i;
+          break;
+        }
+      }
+      modeMsgEl.textContent = "Active: " + versionLabel(mode);
+    }
+  }
+
+  /** Send switch request to backend and update UI. */
+  async function switchMode(mode) {
+    try {
+      var resp = await fetch("/api/umap/switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: mode }),
+      });
+      var data = await resp.json();
+      if (data.error) {
+        modeMsgEl.textContent = "Error: " + data.error;
+      } else {
+        applyMode(mode);
+        loadGraph();
+      }
+    } catch (err) {
+      modeMsgEl.textContent = "Switch failed.";
+    }
+  }
+
+  // --- Original button click ---
+  originalBtn.addEventListener("click", function () {
+    switchMode("original");
+  });
+
+  // --- Dropdown change ---
+  versionSelect.addEventListener("change", function () {
+    var selected = versionSelect.value;
+    if (selected) switchMode(selected);
+  });
+
   // --- Fit UMAP ---
   document.getElementById("fit-umap-btn").addEventListener("click", async function () {
     var btn = this;
@@ -1727,8 +1860,24 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
         msgEl.textContent = "Error: " + data.error;
       } else {
         msgEl.textContent = data.message + " (" + data.num_edges + " edges)";
-        document.getElementById("mode-umap-btn").disabled = false;
-        applyMode("umap");
+        // Add the new version to the dropdown if not already present
+        var key = data.version_key;
+        // Remove disabled placeholders (e.g. "No UMAP versions")
+        for (var i = versionSelect.options.length - 1; i >= 0; i--) {
+          if (versionSelect.options[i].disabled) versionSelect.remove(i);
+        }
+        var exists = false;
+        for (var i = 0; i < versionSelect.options.length; i++) {
+          if (versionSelect.options[i].value === key) { exists = true; break; }
+        }
+        if (!exists) {
+          var opt = document.createElement("option");
+          opt.value = key;
+          opt.textContent = versionLabel(key);
+          versionSelect.appendChild(opt);
+        }
+        versionSelect.disabled = false;
+        applyMode(key);
         loadGraph();
       }
     } catch (err) {
@@ -1738,48 +1887,14 @@ document.querySelectorAll(".tab-btn").forEach(function (btn) {
     }
   });
 
-  // --- Mode toggle buttons ---
-  document.querySelectorAll(".mode-btn").forEach(function (btn) {
-    btn.addEventListener("click", async function () {
-      var mode = this.dataset.mode;
-      var msgEl = document.getElementById("umap-mode-msg");
-
-      try {
-        var resp = await fetch("/api/umap/switch", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ mode: mode }),
-        });
-        var data = await resp.json();
-        if (data.error) {
-          msgEl.textContent = "Error: " + data.error;
-        } else {
-          applyMode(mode);
-          loadGraph();
-        }
-      } catch (err) {
-        msgEl.textContent = "Switch failed.";
-      }
-    });
-  });
-
-  /** Update toggle appearance and status text to reflect the active mode. */
-  function applyMode(mode) {
-    document.querySelectorAll(".mode-btn").forEach(function (b) {
-      b.classList.toggle("active", b.dataset.mode === mode);
-    });
-    document.getElementById("umap-mode-msg").textContent =
-      mode === "umap"
-        ? "Active: UMAP 32-dim embeddings"
-        : "Active: original embeddings";
-  }
-
   // Sync UI to whatever mode the server is in (e.g. after page reload).
   fetch("/api/umap/status")
     .then(function (r) { return r.json(); })
     .then(function (data) {
-      applyMode(data.mode || "original");
-      document.getElementById("mode-umap-btn").disabled = !data.umap_available;
+      var versions = data.available_versions || [];
+      var mode = data.mode || "original";
+      populateVersionSelect(versions, mode);
+      applyMode(mode);
     })
     .catch(function () { /* non-fatal */ });
 }());

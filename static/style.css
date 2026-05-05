@@ -604,6 +604,40 @@ aside label {
   cursor: not-allowed;
 }
 
+/* UMAP version dropdown inside mode-toggle */
+#umap-version-select {
+  flex: 1;
+  padding: 8px 8px;
+  background: transparent;
+  color: #39FF14;
+  border: none;
+  border-left: 1px solid #39FF14;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  text-align: center;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+#umap-version-select:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#umap-version-select.active-select {
+  background: #39FF14;
+  color: #000000;
+}
+
+#umap-version-select option {
+  background-color: #1E1E1E;
+  color: #FFFFFF;
+}
+
 #fit-umap-btn {
   width: 100%;
   padding: 10px;
